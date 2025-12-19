@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import random
 import re
@@ -216,7 +217,7 @@ def evaluate_qwen_model(
 def evaluate_claude_model(
     examples: list[CountingExample],
     max_tokens: int = 10,
-    max_concurrent: int = 20,
+    max_concurrent: int = 15,
 ) -> dict:
     """Evaluate Claude via Anthropic API on the counting task.
 
@@ -342,6 +343,23 @@ def _compute_metrics(results: list[dict], model_name: str) -> dict:
         "num_examples": len(results),
         "results": results,
     }
+
+
+def save_results(results: dict, output_file: str):
+    """Save evaluation results to a JSON file."""
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to: {output_file}")
+
+
+def load_results(input_file: str) -> dict:
+    """Load evaluation results from a JSON file."""
+    with open(input_file, "r") as f:
+        results = json.load(f)
+    print(f"Loaded results from: {input_file}")
+    print(f"  Model: {results['model_name']}")
+    print(f"  Examples: {results['num_examples']}")
+    return results
 
 
 def print_results_table(all_results: list[dict]):
@@ -618,6 +636,18 @@ def main():
         help="Output file for scatter plot (default: counting_performance.png)",
     )
     parser.add_argument(
+        "--save",
+        type=str,
+        metavar="FILE",
+        help="Save results to JSON file",
+    )
+    parser.add_argument(
+        "--load",
+        type=str,
+        metavar="FILE",
+        help="Load results from JSON file instead of running evaluation",
+    )
+    parser.add_argument(
         "--dtype",
         choices=["float16", "bfloat16"],
         default="float16",
@@ -626,42 +656,53 @@ def main():
 
     args = parser.parse_args()
 
-    # Set random seed
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
-    # Generate test examples
-    print(f"Generating {args.num_samples} test examples...")
-    examples = [
-        generate_counting_example(
-            min_length=args.min_length,
-            max_length=args.max_length,
-            target_freq=args.target_freq,
-        )
-        for _ in range(args.num_samples)
-    ]
-
-    # Show distribution of counts
-    count_dist = {}
-    for ex in examples:
-        count_dist[ex.true_count] = count_dist.get(ex.true_count, 0) + 1
-    print(f"Count distribution: {dict(sorted(count_dist.items()))}")
-
-    # Evaluate model based on selection
-    if args.model == "qwen":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
-        result = evaluate_qwen_model(
-            examples=examples,
-            device=device,
-        )
-    elif args.model == "claude":
-        result = evaluate_claude_model(
-            examples=examples,
-        )
+    # Load results from file if specified
+    if args.load:
+        result = load_results(args.load)
     else:
-        print(f"Unknown model: {args.model}")
-        return
+        # Set random seed
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+
+        # Generate test examples
+        print(f"Generating {args.num_samples} test examples...")
+        examples = [
+            generate_counting_example(
+                min_length=args.min_length,
+                max_length=args.max_length,
+                target_freq=args.target_freq,
+            )
+            for _ in range(args.num_samples)
+        ]
+
+        # Show distribution of counts
+        count_dist = {}
+        for ex in examples:
+            count_dist[ex.true_count] = count_dist.get(ex.true_count, 0) + 1
+        print(f"Count distribution: {dict(sorted(count_dist.items()))}")
+
+        # Evaluate model based on selection
+        if args.model == "qwen":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Using device: {device}")
+            result = evaluate_qwen_model(
+                examples=examples,
+                device=device,
+            )
+        elif args.model == "claude":
+            result = evaluate_claude_model(
+                examples=examples,
+            )
+        else:
+            print(f"Unknown model: {args.model}")
+            return
+
+        if result is None:
+            return
+
+        # Save results if requested
+        if args.save:
+            save_results(result, args.save)
 
     if result:
         if args.show_examples:
