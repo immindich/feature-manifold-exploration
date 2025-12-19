@@ -60,14 +60,25 @@ def generate_counting_example(
     min_length: int = 10,
     max_length: int = 30,
     target_freq: float = 0.2,
+    vary_freq: bool = True,
 ) -> CountingExample:
-    """Generate a random sequence with a known count of target tokens."""
+    """Generate a random sequence with a known count of target tokens.
+
+    Args:
+        vary_freq: If True, randomize target_freq per example (0.05 to 0.5) to
+                   decouple count from sequence length.
+    """
     if other_tokens is None:
         other_tokens = ["A", "B", "C", "D", "E"]
-    
+
     length = random.randint(min_length, max_length)
+
+    # Vary frequency per example to decouple count from length
+    if vary_freq:
+        target_freq = random.uniform(0.05, 0.5)
+
     tokens = []
-    
+
     for _ in range(length):
         if random.random() < target_freq:
             tokens.append(target_token)
