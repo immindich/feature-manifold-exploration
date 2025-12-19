@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+"""
+Evaluate language models on a token counting task.
+
+Tests whether models can accurately count occurrences of a target token
+in a sequence, for studying count representations in mechanistic interpretability.
+
+Supports:
+- Local models via transformers (e.g., Qwen3-4B-Instruct)
+- Claude via Anthropic API (e.g., Claude 4.5 Sonnet)
+
+Usage:
+    # Evaluate local Qwen model
+    python eval_counting.py --model qwen
+
+    # Evaluate Claude 4.5 Sonnet
+    python eval_counting.py --model claude
+
+    # Test different sequence lengths
+    python eval_counting.py --model claude --num_samples 200 --min_length 30 --max_length 100
+
+    # Detailed analysis with plot
+    python eval_counting.py --model claude --analyze_bins --show_examples --plot
+"""
+
+import argparse
+import os
+import random
+import re
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+from dotenv import load_dotenv
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Load environment variables
+load_dotenv()
+
+# Model configurations
+QWEN_MODEL_NAME = "qwen3-4b-instruct"
+QWEN_MODEL_PATH = "Qwen/Qwen3-4B-Instruct-2507"
+
+CLAUDE_MODEL_NAME = "claude-4.5-sonnet"
+CLAUDE_MODEL_ID = "claude-sonnet-4-5-20250929"
+
+
+@dataclass
+class CountingExample:
+    sequence: str
+    target_token: str
+    true_count: int
+    tokens: list[str]
+
+
+def generate_counting_example(
+    target_token: str = "X",
+    other_tokens: list[str] = None,
+    min_length: int = 10,
+    max_length: int = 30,
+    target_freq: float = 0.2,
+) -> CountingExample:
+    """Generate a random sequence with a known count of target tokens."""
+    if other_tokens is None:
+        other_tokens = ["A", "B", "C", "D", "E"]
+    
+    length = random.randint(min_length, max_length)
+    tokens = []
+    
+    for _ in range(length):
+        if random.random() < target_freq:
+            tokens.append(target_token)
+        else:
+            tokens.append(random.choice(other_tokens))
+    
+    true_count = tokens.count(target_token)
+    sequence = " ".join(tokens)
+    
+    return CountingExample(
+        sequence=sequence,
+        target_token=target_token,
+        true_count=true_count,
+        tokens=tokens,
+    )
+
+
+def create_prompt(example: CountingExample, for_claude: bool = False) -> str:
+    """Create a prompt for the counting task."""
+    if for_claude:
+        # More explicit instruction for Claude
+        return (
+            f"Count how many times the token '{example.target_token}' appears in this sequence:\n\n"
+            f"{example.sequence}\n\n"
+            f"Respond with ONLY the number. Do not include any explanation, words, or other text."
+        )
+    else:
+        return (
+            f"Count how many times '{example.target_token}' appears in this sequence: {example.sequence}\n\n"
+            f"Answer with just the number, nothing else."
+        )
+
+
+def extract_count_from_response(response: str) -> int | None:
+    """Try to extract a number from the model's response."""
+    # Clean up response
+    response = response.strip()
+    
+    # Try to find a number at the start
+    match = re.match(r'\s*(\d+)', response)
+    if match:
+        return int(match.group(1))
+    
+    # Try to find any number in the response
+    numbers = re.findall(r'\d+', response)
+    if numbers:
+        return int(numbers[0])
+    
+    # Try to parse word numbers
+    word_to_num = {
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "ten": 10, "eleven": 11, "twelve": 12,
+    }
+    response_lower = response.lower()
+    for word, num in word_to_num.items():
+        if word in response_lower:
+            return num
+    
+    return None
+
+
+def evaluate_qwen_model(
+    examples: list[CountingExample],
+    device: str = "cuda",
+    max_new_tokens: int = 10,
+) -> dict:
+    """Evaluate Qwen3-4B-Instruct on the counting task."""
+    print(f"\nLoading {QWEN_MODEL_NAME}...")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_PATH, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            QWEN_MODEL_PATH,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    except Exception as e:
+        print(f"  Failed to load model: {e}")
+        return None
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model.eval()
+
+    results = []
+
+    for example in tqdm(examples, desc="  Evaluating"):
+        prompt = create_prompt(example)
+
+        # Wrap in chat format
+        if hasattr(tokenizer, 'apply_chat_template'):
+            messages = [{"role": "user", "content": prompt}]
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,  # Greedy decoding for reproducibility
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+        # Decode only the new tokens
+        response = tokenizer.decode(
+            outputs[0][inputs.input_ids.shape[1]:],
+            skip_special_tokens=True,
+        )
+
+        predicted_count = extract_count_from_response(response)
+
+        results.append({
+            "true_count": example.true_count,
+            "predicted_count": predicted_count,
+            "response": response[:50],  # Truncate for display
+            "correct": predicted_count == example.true_count,
+            "sequence_length": len(example.tokens),
+        })
+
+    # Clean up GPU memory
+    del model
+    torch.cuda.empty_cache()
+
+    return _compute_metrics(results, QWEN_MODEL_NAME)
+
+
+def evaluate_claude_model(
+    examples: list[CountingExample],
+    max_tokens: int = 10,
+    max_concurrent: int = 20,
+) -> dict:
+    """Evaluate Claude via Anthropic API on the counting task.
+
+    Uses async requests with concurrency for speed.
+    """
+    try:
+        import asyncio
+        from anthropic import AsyncAnthropic
+    except ImportError:
+        print("Error: anthropic package is required. Install with: pip install anthropic")
+        return None
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Error: ANTHROPIC_API_KEY not found in environment variables")
+        return None
+
+    print(f"\nUsing Claude API ({CLAUDE_MODEL_NAME}) with {max_concurrent} concurrent requests...")
+
+    async def process_example(
+        client: "AsyncAnthropic",
+        idx: int,
+        example: CountingExample,
+        semaphore: asyncio.Semaphore,
+        pbar: tqdm,
+    ) -> dict:
+        """Process a single example with retry logic."""
+        prompt = create_prompt(example, for_claude=True)
+        max_retries = 3
+        retry_delay = 2
+        response = ""
+
+        async with semaphore:
+            for attempt in range(max_retries):
+                try:
+                    message = await client.messages.create(
+                        model=CLAUDE_MODEL_ID,
+                        max_tokens=max_tokens,
+                        temperature=0,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    response = message.content[0].text
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        tqdm.write(f"    Error on example {idx} after {max_retries} attempts: {e}")
+                        response = ""
+
+            pbar.update(1)
+
+        predicted_count = extract_count_from_response(response)
+        return {
+            "idx": idx,
+            "true_count": example.true_count,
+            "predicted_count": predicted_count,
+            "response": response[:50],
+            "correct": predicted_count == example.true_count,
+            "sequence_length": len(example.tokens),
+        }
+
+    async def run_all():
+        client = AsyncAnthropic(api_key=api_key)
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        with tqdm(total=len(examples), desc="  Evaluating") as pbar:
+            tasks = [
+                process_example(client, i, ex, semaphore, pbar)
+                for i, ex in enumerate(examples)
+            ]
+            results = await asyncio.gather(*tasks)
+
+        # Sort by original index to maintain order
+        results.sort(key=lambda x: x["idx"])
+        # Remove idx field
+        for r in results:
+            del r["idx"]
+        return results
+
+    results = asyncio.run(run_all())
+    return _compute_metrics(results, CLAUDE_MODEL_NAME)
+
+
+def _compute_metrics(results: list[dict], model_name: str) -> dict:
+    """Compute evaluation metrics from results."""
+    valid_results = [r for r in results if r["predicted_count"] is not None]
+
+    accuracy = sum(r["correct"] for r in results) / len(results)
+    parse_rate = len(valid_results) / len(results)
+
+    # Correlation (only for parsed results)
+    if len(valid_results) > 1:
+        true_counts = [r["true_count"] for r in valid_results]
+        pred_counts = [r["predicted_count"] for r in valid_results]
+
+        # Pearson correlation
+        mean_true = sum(true_counts) / len(true_counts)
+        mean_pred = sum(pred_counts) / len(pred_counts)
+
+        numerator = sum((t - mean_true) * (p - mean_pred) for t, p in zip(true_counts, pred_counts))
+        denom_true = sum((t - mean_true) ** 2 for t in true_counts) ** 0.5
+        denom_pred = sum((p - mean_pred) ** 2 for p in pred_counts) ** 0.5
+
+        if denom_true > 0 and denom_pred > 0:
+            correlation = numerator / (denom_true * denom_pred)
+        else:
+            correlation = 0.0
+
+        # Mean absolute error
+        mae = sum(abs(t - p) for t, p in zip(true_counts, pred_counts)) / len(valid_results)
+    else:
+        correlation = 0.0
+        mae = float('inf')
+
+    return {
+        "model_name": model_name,
+        "accuracy": accuracy,
+        "correlation": correlation,
+        "mae": mae,
+        "parse_rate": parse_rate,
+        "num_examples": len(results),
+        "results": results,
+    }
+
+
+def print_results_table(all_results: list[dict]):
+    """Print a summary table of results."""
+    print("\n" + "=" * 80)
+    print("RESULTS SUMMARY")
+    print("=" * 80)
+    print(f"{'Model':<20} {'Accuracy':>10} {'Correlation':>12} {'MAE':>8} {'Parse Rate':>12}")
+    print("-" * 80)
+    
+    for result in all_results:
+        if result is None:
+            continue
+        print(
+            f"{result['model_name']:<20} "
+            f"{result['accuracy']:>10.1%} "
+            f"{result['correlation']:>12.3f} "
+            f"{result['mae']:>8.2f} "
+            f"{result['parse_rate']:>12.1%}"
+        )
+    print("=" * 80)
+
+
+def print_example_outputs(results: dict, num_examples: int = 5):
+    """Print some example model outputs."""
+    print(f"\nExample outputs for {results['model_name']}:")
+    print("-" * 60)
+
+    for r in results["results"][:num_examples]:
+        status = "✓" if r["correct"] else "✗"
+        print(f"  True: {r['true_count']:>2}, Predicted: {str(r['predicted_count']):>4}, "
+              f"{status} Response: {r['response']!r}")
+
+
+def analyze_by_bins(results: dict, bin_type: str = "count"):
+    """Analyze results by count bins or sequence length bins.
+
+    Args:
+        bin_type: Either "count" (bin by true count) or "length" (bin by sequence length)
+    """
+    from collections import Counter
+
+    print(f"\n{results['model_name']} - Analysis by {bin_type}:")
+    print("-" * 80)
+
+    if bin_type == "count":
+        bins = [(0, 3), (4, 6), (7, 9), (10, 12), (13, 20)]
+        bin_key = lambda r: r['true_count']
+    elif bin_type == "length":
+        bins = [(10, 20), (21, 30), (31, 40), (41, 50)]
+        bin_key = lambda r: r.get('sequence_length', 0)
+    else:
+        raise ValueError(f"Unknown bin_type: {bin_type}")
+
+    for low, high in bins:
+        bin_results = [r for r in results['results']
+                      if low <= bin_key(r) <= high and r['predicted_count'] is not None]
+        if not bin_results:
+            continue
+
+        acc = sum(r['correct'] for r in bin_results) / len(bin_results)
+        mae = sum(abs(r['true_count'] - r['predicted_count']) for r in bin_results) / len(bin_results)
+        avg_pred = sum(r['predicted_count'] for r in bin_results) / len(bin_results)
+        avg_true = sum(r['true_count'] for r in bin_results) / len(bin_results)
+
+        # Compute correlation within bin
+        if len(bin_results) > 1:
+            true_counts = [r['true_count'] for r in bin_results]
+            pred_counts = [r['predicted_count'] for r in bin_results]
+            mean_true = sum(true_counts) / len(true_counts)
+            mean_pred = sum(pred_counts) / len(pred_counts)
+
+            numerator = sum((t - mean_true) * (p - mean_pred) for t, p in zip(true_counts, pred_counts))
+            denom_true = sum((t - mean_true) ** 2 for t in true_counts) ** 0.5
+            denom_pred = sum((p - mean_pred) ** 2 for p in pred_counts) ** 0.5
+
+            if denom_true > 0 and denom_pred > 0:
+                corr = numerator / (denom_true * denom_pred)
+            else:
+                corr = 0.0
+        else:
+            corr = 0.0
+
+        # Prediction diversity
+        pred_counter = Counter(r['predicted_count'] for r in bin_results)
+        diversity = len(pred_counter)  # Number of unique predictions
+
+        print(f"  {bin_type.capitalize()} {low:>2}-{high:<2}: "
+              f"N={len(bin_results):>3} | "
+              f"Acc={acc:>5.1%} | "
+              f"Corr={corr:>5.2f} | "
+              f"MAE={mae:>4.2f} | "
+              f"AvgTrue={avg_true:>4.1f} | "
+              f"AvgPred={avg_pred:>4.1f} | "
+              f"Diversity={diversity}")
+    print()
+
+
+def create_scatter_plot(results: dict, output_file: str = "counting_performance.png"):
+    """Create a scatter plot visualization of model performance."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Error: matplotlib is required for plotting. Install with: pip install matplotlib")
+        return
+
+    valid_results = [r for r in results['results'] if r['predicted_count'] is not None]
+    true_counts = [r['true_count'] for r in valid_results]
+    pred_counts = [r['predicted_count'] for r in valid_results]
+    seq_lengths = [r['sequence_length'] for r in valid_results]
+    correct = [r['correct'] for r in valid_results]
+
+    # Create figure with multiple subplots
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+    # Subplot 1: Predicted vs True with perfect line
+    ax1 = axes[0, 0]
+    colors = ['green' if c else 'red' for c in correct]
+    ax1.scatter(true_counts, pred_counts, c=colors, alpha=0.6, s=50)
+
+    # Add perfect prediction line
+    max_count = max(max(true_counts), max(pred_counts))
+    ax1.plot([0, max_count], [0, max_count], 'k--', linewidth=2, label='Perfect prediction')
+
+    # Add best fit line
+    coeffs = np.polyfit(true_counts, pred_counts, 1)
+    fit_line = np.poly1d(coeffs)
+    x_fit = np.linspace(0, max_count, 100)
+    ax1.plot(x_fit, fit_line(x_fit), 'b-', linewidth=2, alpha=0.7,
+             label=f'Best fit: y={coeffs[0]:.2f}x+{coeffs[1]:.2f}')
+
+    ax1.set_xlabel('True Count', fontsize=12)
+    ax1.set_ylabel('Predicted Count', fontsize=12)
+    ax1.set_title(f'{results["model_name"]}: Predicted vs True Count\\nAccuracy: {results["accuracy"]:.1%}, Correlation: {results["correlation"]:.3f}',
+                  fontsize=13, fontweight='bold')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Subplot 2: Error vs True Count
+    ax2 = axes[0, 1]
+    errors = [p - t for t, p in zip(true_counts, pred_counts)]
+    ax2.scatter(true_counts, errors, alpha=0.6, s=50, c='purple')
+    ax2.axhline(y=0, color='k', linestyle='--', linewidth=2)
+
+    # Add mean error line
+    mean_error = np.mean(errors)
+    ax2.axhline(y=mean_error, color='r', linestyle='-', linewidth=2, alpha=0.7,
+                label=f'Mean error: {mean_error:+.2f}')
+
+    ax2.set_xlabel('True Count', fontsize=12)
+    ax2.set_ylabel('Prediction Error (Pred - True)', fontsize=12)
+    ax2.set_title('Error Analysis', fontsize=13, fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # Subplot 3: Performance by Sequence Length
+    ax3 = axes[1, 0]
+    scatter = ax3.scatter(seq_lengths, true_counts, c=pred_counts, alpha=0.6, s=50, cmap='viridis')
+    ax3.set_xlabel('Sequence Length', fontsize=12)
+    ax3.set_ylabel('True Count', fontsize=12)
+    ax3.set_title('Sequence Length vs Count (color=prediction)', fontsize=13, fontweight='bold')
+    plt.colorbar(scatter, ax=ax3, label='Predicted Count')
+    ax3.grid(True, alpha=0.3)
+
+    # Subplot 4: Accuracy by Count Bins
+    ax4 = axes[1, 1]
+    from collections import Counter
+
+    # Determine bins based on data range
+    max_true = max(true_counts)
+    if max_true <= 15:
+        bins = [(0, 3), (4, 6), (7, 9), (10, 12), (13, 20)]
+    elif max_true <= 30:
+        bins = [(0, 5), (6, 10), (11, 15), (16, 20), (21, 30)]
+    else:
+        bins = [(0, 10), (11, 20), (21, 30), (31, 40), (41, 100)]
+
+    bin_accs = []
+    bin_labels = []
+    bin_ns = []
+
+    for low, high in bins:
+        bin_results = [r for r in valid_results if low <= r['true_count'] <= high]
+        if bin_results:
+            acc = sum(r['correct'] for r in bin_results) / len(bin_results)
+            bin_accs.append(acc * 100)
+            bin_labels.append(f'{low}-{high}')
+            bin_ns.append(len(bin_results))
+
+    if bin_accs:
+        bars = ax4.bar(bin_labels, bin_accs, color=['green' if a > 50 else 'orange' if a > 25 else 'red' for a in bin_accs])
+        ax4.set_xlabel('Count Range', fontsize=12)
+        ax4.set_ylabel('Accuracy (%)', fontsize=12)
+        ax4.set_title('Accuracy by Count Range', fontsize=13, fontweight='bold')
+        ax4.set_ylim([0, 100])
+
+        # Add N labels on bars
+        for bar, n in zip(bars, bin_ns):
+            height = bar.get_height()
+            ax4.text(bar.get_x() + bar.get_width()/2., height + 2,
+                    f'N={n}', ha='center', va='bottom', fontsize=9)
+
+        ax4.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f'\nScatter plot saved to: {output_file}')
+
+    # Print additional statistics
+    print(f'\nPlot statistics:')
+    print(f'  Best fit slope: {coeffs[0]:.3f} (1.0 = perfect)')
+    print(f'  Best fit intercept: {coeffs[1]:.2f} (0.0 = no bias)')
+    print(f'  Mean error: {np.mean(errors):.2f}')
+    print(f'  Std error: {np.std(errors):.2f}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate language models on token counting task")
+    parser.add_argument(
+        "--model",
+        choices=["qwen", "claude"],
+        default="qwen",
+        help="Model to evaluate: 'qwen' for local Qwen3-4B-Instruct, 'claude' for Claude 4.5 Sonnet via API",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=100,
+        help="Number of test examples to generate",
+    )
+    parser.add_argument(
+        "--min_length",
+        type=int,
+        default=10,
+        help="Minimum sequence length",
+    )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=30,
+        help="Maximum sequence length",
+    )
+    parser.add_argument(
+        "--target_freq",
+        type=float,
+        default=0.2,
+        help="Frequency of target token in sequences",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
+    )
+    parser.add_argument(
+        "--show_examples",
+        action="store_true",
+        help="Show example outputs for each model",
+    )
+    parser.add_argument(
+        "--analyze_bins",
+        action="store_true",
+        help="Show detailed analysis by count ranges and sequence lengths",
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Generate scatter plot visualization",
+    )
+    parser.add_argument(
+        "--plot_file",
+        type=str,
+        default="counting_performance.png",
+        help="Output file for scatter plot (default: counting_performance.png)",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "bfloat16"],
+        default="float16",
+        help="Data type for model weights (default: float16, only used for local models)",
+    )
+
+    args = parser.parse_args()
+
+    # Set random seed
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # Generate test examples
+    print(f"Generating {args.num_samples} test examples...")
+    examples = [
+        generate_counting_example(
+            min_length=args.min_length,
+            max_length=args.max_length,
+            target_freq=args.target_freq,
+        )
+        for _ in range(args.num_samples)
+    ]
+
+    # Show distribution of counts
+    count_dist = {}
+    for ex in examples:
+        count_dist[ex.true_count] = count_dist.get(ex.true_count, 0) + 1
+    print(f"Count distribution: {dict(sorted(count_dist.items()))}")
+
+    # Evaluate model based on selection
+    if args.model == "qwen":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+        result = evaluate_qwen_model(
+            examples=examples,
+            device=device,
+        )
+    elif args.model == "claude":
+        result = evaluate_claude_model(
+            examples=examples,
+        )
+    else:
+        print(f"Unknown model: {args.model}")
+        return
+
+    if result:
+        if args.show_examples:
+            print_example_outputs(result)
+
+        if args.analyze_bins:
+            analyze_by_bins(result, bin_type="count")
+            analyze_by_bins(result, bin_type="length")
+
+        # Print summary
+        print_results_table([result])
+
+        # Analysis
+        print(f"\nRESULTS:")
+        print(f"  Accuracy: {result['accuracy']:.1%}")
+        print(f"  Correlation: {result['correlation']:.3f}")
+        print(f"  MAE: {result['mae']:.2f}")
+        print(f"  Parse rate: {result['parse_rate']:.1%}")
+
+        if result["correlation"] > 0.7:
+            print(f"\n  Strong correlation - model has structured count representation")
+        elif result["correlation"] > 0.4:
+            print(f"\n  Moderate correlation - representation may be noisy")
+
+        # Generate plot if requested
+        if args.plot:
+            create_scatter_plot(result, args.plot_file)
+
+
+if __name__ == "__main__":
+    main()
