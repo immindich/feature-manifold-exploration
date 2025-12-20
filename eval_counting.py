@@ -635,12 +635,6 @@ def main():
             for _ in range(args.num_samples)
         ]
 
-        # Show distribution of counts
-        count_dist = {}
-        for ex in examples:
-            count_dist[ex.true_count] = count_dist.get(ex.true_count, 0) + 1
-        print(f"Count distribution: {dict(sorted(count_dist.items()))}")
-
         # Evaluate model based on selection
         model_config = AVAILABLE_MODELS[args.model]
 
@@ -649,7 +643,7 @@ def main():
             if device == "cpu":
                 print("Error: CUDA is required for local model evaluation. CPU is not supported.")
                 return
-            print(f"Using device: {device}")
+            print(f"Using dtype: {args.dtype}")
             result = evaluate_qwen_model(
                 examples=examples,
                 model_config=model_config,
