@@ -110,7 +110,7 @@ def evaluate_qwen_model(
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -610,8 +610,8 @@ def main():
     parser.add_argument(
         "--dtype",
         choices=["float16", "bfloat16"],
-        default="float16",
-        help="Data type for model weights (default: float16, only used for local models)",
+        default="bfloat16",
+        help="Data type for model weights (default: bfloat16, only used for local models)",
     )
 
     args = parser.parse_args()
@@ -646,6 +646,9 @@ def main():
 
         if model_config["type"] == "local":
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            if device == "cpu":
+                print("Error: CUDA is required for local model evaluation. CPU is not supported.")
+                return
             print(f"Using device: {device}")
             result = evaluate_qwen_model(
                 examples=examples,
