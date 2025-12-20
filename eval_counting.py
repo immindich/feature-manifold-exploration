@@ -6,12 +6,15 @@ Tests whether models can accurately count occurrences of a target token
 in a sequence, for studying count representations in mechanistic interpretability.
 
 Supports:
-- Local models via transformers (e.g., Qwen3-4B-Instruct)
-- Claude via Anthropic API (e.g., Claude 4.5 Sonnet)
+- Local models via transformers (Qwen3-4B-Instruct, Qwen3-14B)
+- Claude via Anthropic API (Claude 4.5 Sonnet)
 
 Usage:
-    # Evaluate local Qwen model
-    python eval_counting.py --model qwen
+    # Evaluate local Qwen 4B model (default)
+    python eval_counting.py --model qwen-4b
+
+    # Evaluate local Qwen 14B model (requires more VRAM)
+    python eval_counting.py --model qwen-14b
 
     # Evaluate Claude 4.5 Sonnet
     python eval_counting.py --model claude
@@ -28,7 +31,6 @@ import json
 import os
 import random
 import re
-from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -36,81 +38,29 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from counting_data import CountingExample, generate_counting_example, create_prompt
+
 # Load environment variables
 load_dotenv()
 
 # Model configurations
-QWEN_MODEL_NAME = "qwen3-4b-instruct"
-QWEN_MODEL_PATH = "Qwen/Qwen3-4B-Instruct-2507"
-
-CLAUDE_MODEL_NAME = "claude-4.5-sonnet"
-CLAUDE_MODEL_ID = "claude-sonnet-4-5-20250929"
-
-
-@dataclass
-class CountingExample:
-    sequence: str
-    target_token: str
-    true_count: int
-    tokens: list[str]
-
-
-def generate_counting_example(
-    target_token: str = "X",
-    other_tokens: list[str] = None,
-    min_length: int = 10,
-    max_length: int = 30,
-    target_freq: float = 0.2,
-    vary_freq: bool = True,
-) -> CountingExample:
-    """Generate a random sequence with a known count of target tokens.
-
-    Args:
-        vary_freq: If True, randomize target_freq per example (0.05 to 0.5) to
-                   decouple count from sequence length.
-    """
-    if other_tokens is None:
-        other_tokens = ["A", "B", "C", "D", "E"]
-
-    length = random.randint(min_length, max_length)
-
-    # Vary frequency per example to decouple count from length
-    if vary_freq:
-        target_freq = random.uniform(0.05, 0.5)
-
-    tokens = []
-
-    for _ in range(length):
-        if random.random() < target_freq:
-            tokens.append(target_token)
-        else:
-            tokens.append(random.choice(other_tokens))
-    
-    true_count = tokens.count(target_token)
-    sequence = " ".join(tokens)
-    
-    return CountingExample(
-        sequence=sequence,
-        target_token=target_token,
-        true_count=true_count,
-        tokens=tokens,
-    )
-
-
-def create_prompt(example: CountingExample, for_claude: bool = False) -> str:
-    """Create a prompt for the counting task."""
-    if for_claude:
-        # More explicit instruction for Claude
-        return (
-            f"Count how many times the token '{example.target_token}' appears in this sequence:\n\n"
-            f"{example.sequence}\n\n"
-            f"Respond with ONLY the number. Do not include any explanation, words, or other text."
-        )
-    else:
-        return (
-            f"Count how many times '{example.target_token}' appears in this sequence: {example.sequence}\n\n"
-            f"Answer with just the number, nothing else."
-        )
+AVAILABLE_MODELS = {
+    "qwen-4b": {
+        "name": "qwen3-4b-instruct",
+        "path": "Qwen/Qwen3-4B-Instruct-2507",
+        "type": "local",
+    },
+    "qwen-14b": {
+        "name": "qwen3-14b",
+        "path": "Qwen/Qwen3-14B",
+        "type": "local",
+    },
+    "claude": {
+        "name": "claude-4.5-sonnet",
+        "model_id": "claude-sonnet-4-5-20250929",
+        "type": "api",
+    },
+}
 
 
 def extract_count_from_response(response: str) -> int | None:
@@ -144,17 +94,23 @@ def extract_count_from_response(response: str) -> int | None:
 
 def evaluate_qwen_model(
     examples: list[CountingExample],
+    model_config: dict,
     device: str = "cuda",
     max_new_tokens: int = 10,
+    dtype: str = "float16",
 ) -> dict:
-    """Evaluate Qwen3-4B-Instruct on the counting task."""
-    print(f"\nLoading {QWEN_MODEL_NAME}...")
+    """Evaluate a local Qwen model on the counting task."""
+    model_name = model_config["name"]
+    model_path = model_config["path"]
+    torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
+
+    print(f"\nLoading {model_name} from {model_path}...")
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_PATH, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
-            QWEN_MODEL_PATH,
-            torch_dtype=torch.float16,
+            model_path,
+            torch_dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -211,11 +167,12 @@ def evaluate_qwen_model(
     del model
     torch.cuda.empty_cache()
 
-    return _compute_metrics(results, QWEN_MODEL_NAME)
+    return _compute_metrics(results, model_name)
 
 
 def evaluate_claude_model(
     examples: list[CountingExample],
+    model_config: dict,
     max_tokens: int = 10,
     max_concurrent: int = 15,
 ) -> dict:
@@ -235,7 +192,10 @@ def evaluate_claude_model(
         print("Error: ANTHROPIC_API_KEY not found in environment variables")
         return None
 
-    print(f"\nUsing Claude API ({CLAUDE_MODEL_NAME}) with {max_concurrent} concurrent requests...")
+    model_name = model_config["name"]
+    model_id = model_config["model_id"]
+
+    print(f"\nUsing Claude API ({model_name}) with {max_concurrent} concurrent requests...")
 
     async def process_example(
         client: "AsyncAnthropic",
@@ -245,7 +205,7 @@ def evaluate_claude_model(
         pbar: tqdm,
     ) -> dict:
         """Process a single example with retry logic."""
-        prompt = create_prompt(example, for_claude=True)
+        prompt = create_prompt(example)
         max_retries = 3
         retry_delay = 2
         response = ""
@@ -254,7 +214,7 @@ def evaluate_claude_model(
             for attempt in range(max_retries):
                 try:
                     message = await client.messages.create(
-                        model=CLAUDE_MODEL_ID,
+                        model=model_id,
                         max_tokens=max_tokens,
                         temperature=0,
                         messages=[{"role": "user", "content": prompt}],
@@ -300,7 +260,7 @@ def evaluate_claude_model(
         return results
 
     results = asyncio.run(run_all())
-    return _compute_metrics(results, CLAUDE_MODEL_NAME)
+    return _compute_metrics(results, model_name)
 
 
 def _compute_metrics(results: list[dict], model_name: str) -> dict:
@@ -580,9 +540,9 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate language models on token counting task")
     parser.add_argument(
         "--model",
-        choices=["qwen", "claude"],
-        default="qwen",
-        help="Model to evaluate: 'qwen' for local Qwen3-4B-Instruct, 'claude' for Claude 4.5 Sonnet via API",
+        choices=list(AVAILABLE_MODELS.keys()),
+        default="qwen-4b",
+        help="Model to evaluate: 'qwen-4b' (default), 'qwen-14b', or 'claude'",
     )
     parser.add_argument(
         "--num_samples",
@@ -682,19 +642,24 @@ def main():
         print(f"Count distribution: {dict(sorted(count_dist.items()))}")
 
         # Evaluate model based on selection
-        if args.model == "qwen":
+        model_config = AVAILABLE_MODELS[args.model]
+
+        if model_config["type"] == "local":
             device = "cuda" if torch.cuda.is_available() else "cpu"
             print(f"Using device: {device}")
             result = evaluate_qwen_model(
                 examples=examples,
+                model_config=model_config,
                 device=device,
+                dtype=args.dtype,
             )
-        elif args.model == "claude":
+        elif model_config["type"] == "api":
             result = evaluate_claude_model(
                 examples=examples,
+                model_config=model_config,
             )
         else:
-            print(f"Unknown model: {args.model}")
+            print(f"Unknown model type: {model_config['type']}")
             return
 
         if result is None:
