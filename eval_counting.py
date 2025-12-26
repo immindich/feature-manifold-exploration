@@ -38,7 +38,11 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from counting_data import CountingExample, generate_counting_example, create_prompt
+from counting_data import (
+    CountingSequence,
+    create_prompt,
+    generate_uniform_count_sequences,
+)
 
 # Load environment variables
 load_dotenv()
@@ -108,7 +112,7 @@ def extract_count_from_response(response: str) -> int | None:
 
 
 def evaluate_qwen_model(
-    examples: list[CountingExample],
+    examples: list[CountingSequence],
     model_config: dict,
     device: str = "cuda",
     max_new_tokens: int = 10,
@@ -176,7 +180,7 @@ def evaluate_qwen_model(
             "predicted_count": predicted_count,
             "response": response[:50],  # Truncate for display
             "correct": predicted_count == example.true_count,
-            "sequence_length": len(example.tokens),
+            "sequence_length": example.sequence_length,
         })
 
     # Clean up GPU memory
@@ -187,7 +191,7 @@ def evaluate_qwen_model(
 
 
 def evaluate_claude_model(
-    examples: list[CountingExample],
+    examples: list[CountingSequence],
     model_config: dict,
     max_tokens: int = 10,
     max_concurrent: int = 15,
@@ -216,7 +220,7 @@ def evaluate_claude_model(
     async def process_example(
         client: "AsyncAnthropic",
         idx: int,
-        example: CountingExample,
+        example: CountingSequence,
         semaphore: asyncio.Semaphore,
         pbar: tqdm,
     ) -> dict:
@@ -254,7 +258,7 @@ def evaluate_claude_model(
             "predicted_count": predicted_count,
             "response": response[:50],
             "correct": predicted_count == example.true_count,
-            "sequence_length": len(example.tokens),
+            "sequence_length": example.sequence_length,
         }
 
     async def run_all():
@@ -567,6 +571,18 @@ def main():
         help="Number of test examples to generate",
     )
     parser.add_argument(
+        "--min_count",
+        type=int,
+        default=0,
+        help="Minimum target count",
+    )
+    parser.add_argument(
+        "--max_count",
+        type=int,
+        default=30,
+        help="Maximum target count",
+    )
+    parser.add_argument(
         "--min_length",
         type=int,
         default=10,
@@ -575,14 +591,8 @@ def main():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=30,
+        default=100,
         help="Maximum sequence length",
-    )
-    parser.add_argument(
-        "--target_freq",
-        type=float,
-        default=0.2,
-        help="Frequency of target token in sequences",
     )
     parser.add_argument(
         "--seed",
@@ -641,15 +651,14 @@ def main():
         torch.manual_seed(args.seed)
 
         # Generate test examples
-        print(f"Generating {args.num_samples} test examples...")
-        examples = [
-            generate_counting_example(
-                min_length=args.min_length,
-                max_length=args.max_length,
-                target_freq=args.target_freq,
-            )
-            for _ in range(args.num_samples)
-        ]
+        print(f"Generating {args.num_samples} test examples (count range: {args.min_count}-{args.max_count})...")
+        examples = generate_uniform_count_sequences(
+            min_count=args.min_count,
+            max_count=args.max_count,
+            num_sequences=args.num_samples,
+            length_range=(args.min_length, args.max_length),
+            seed=args.seed,
+        )
 
         # Evaluate model based on selection
         model_config = AVAILABLE_MODELS[args.model]
