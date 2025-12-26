@@ -134,7 +134,8 @@ def evaluate_qwen_model(
             prompt = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
-                add_generation_prompt=True
+                add_generation_prompt=True,
+                enable_thinking=False
             )
 
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -144,7 +145,7 @@ def evaluate_qwen_model(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,  # Greedy decoding for reproducibility
-                pad_token_id=tokenizer.pad_token_id,
+                pad_token_id=tokenizer.pad_token_id
             )
 
         # Decode only the new tokens
