@@ -20,10 +20,16 @@ Usage:
     python eval_counting.py --model claude
 
     # Test different sequence lengths
-    python eval_counting.py --model claude --num_samples 200 --min_length 30 --max_length 100
+    python eval_counting.py --model claude --num-samples 200 --min-length 30 --max-length 100
 
     # Detailed analysis with plot
-    python eval_counting.py --model claude --analyze_bins --show_examples --plot
+    python eval_counting.py --model claude --analyze-bins --show-examples --plot results.png
+
+    # Save results to file
+    python eval_counting.py --model qwen-4b --save results.json
+
+    # Use fixed seed for reproducibility
+    python eval_counting.py --model qwen-4b --seed 42
 """
 
 import argparse
@@ -111,7 +117,7 @@ def extract_count_from_response(response: str) -> int | None:
     return None
 
 
-def evaluate_qwen_model(
+def evaluate_local_model(
     examples: list[CountingSequence],
     model_config: dict,
     device: str = "cuda",
@@ -327,8 +333,19 @@ def _compute_metrics(results: list[dict], model_name: str) -> dict:
 
 def save_results(results: dict, output_file: str):
     """Save evaluation results to a JSON file."""
+    def convert(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     with open(output_file, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, default=convert)
     print(f"Results saved to: {output_file}")
 
 
@@ -565,31 +582,31 @@ def main():
         help="Model to evaluate: 'qwen-4b' (default), 'qwen-14b', or 'claude'",
     )
     parser.add_argument(
-        "--num_samples",
+        "--num-samples",
         type=int,
         default=100,
         help="Number of test examples to generate",
     )
     parser.add_argument(
-        "--min_count",
+        "--min-count",
         type=int,
         default=0,
         help="Minimum target count",
     )
     parser.add_argument(
-        "--max_count",
+        "--max-count",
         type=int,
         default=30,
         help="Maximum target count",
     )
     parser.add_argument(
-        "--min_length",
+        "--min-length",
         type=int,
         default=10,
         help="Minimum sequence length",
     )
     parser.add_argument(
-        "--max_length",
+        "--max-length",
         type=int,
         default=100,
         help="Maximum sequence length",
@@ -597,29 +614,24 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Random seed for reproducibility",
+        default=None,
+        help="Random seed for reproducibility (random by default)",
     )
     parser.add_argument(
-        "--show_examples",
+        "--show-examples",
         action="store_true",
         help="Show example outputs for each model",
     )
     parser.add_argument(
-        "--analyze_bins",
+        "--analyze-bins",
         action="store_true",
         help="Show detailed analysis by count ranges and sequence lengths",
     )
     parser.add_argument(
         "--plot",
-        action="store_true",
-        help="Generate scatter plot visualization",
-    )
-    parser.add_argument(
-        "--plot_file",
         type=str,
-        default="counting_performance.png",
-        help="Output file for scatter plot (default: counting_performance.png)",
+        metavar="FILE",
+        help="Generate scatter plot visualization and save to FILE",
     )
     parser.add_argument(
         "--save",
@@ -646,9 +658,10 @@ def main():
     if args.load:
         result = load_results(args.load)
     else:
-        # Set random seed
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
+        # Set random seed if specified
+        if args.seed is not None:
+            random.seed(args.seed)
+            torch.manual_seed(args.seed)
 
         # Generate test examples
         print(f"Generating {args.num_samples} test examples (count range: {args.min_count}-{args.max_count})...")
@@ -669,7 +682,7 @@ def main():
                 print("Error: CUDA is required for local model evaluation. CPU is not supported.")
                 return
             print(f"Using dtype: {args.dtype}")
-            result = evaluate_qwen_model(
+            result = evaluate_local_model(
                 examples=examples,
                 model_config=model_config,
                 device=device,
@@ -702,21 +715,9 @@ def main():
         # Print summary
         print_results_table([result])
 
-        # Analysis
-        print(f"\nRESULTS:")
-        print(f"  Accuracy: {result['accuracy']:.1%}")
-        print(f"  Correlation: {result['correlation']:.3f}")
-        print(f"  MAE: {result['mae']:.2f}")
-        print(f"  Parse rate: {result['parse_rate']:.1%}")
-
-        if result["correlation"] > 0.7:
-            print(f"\n  Strong correlation - model has structured count representation")
-        elif result["correlation"] > 0.4:
-            print(f"\n  Moderate correlation - representation may be noisy")
-
         # Generate plot if requested
         if args.plot:
-            create_scatter_plot(result, args.plot_file)
+            create_scatter_plot(result, args.plot)
 
 
 if __name__ == "__main__":
