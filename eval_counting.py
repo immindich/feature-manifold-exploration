@@ -123,8 +123,18 @@ def evaluate_local_model(
     device: str = "cuda",
     max_new_tokens: int = 10,
     dtype: str = "float16",
+    batch_size: int = 1,
 ) -> dict:
-    """Evaluate a local Qwen model on the counting task."""
+    """Evaluate a local model on the counting task.
+
+    Args:
+        examples: List of counting sequences to evaluate
+        model_config: Model configuration dict with 'name' and 'path'
+        device: Device to run on (default: cuda)
+        max_new_tokens: Max tokens to generate per example
+        dtype: Model dtype (float16 or bfloat16)
+        batch_size: Number of examples to process in parallel (default: 1)
+    """
     model_name = model_config["name"]
     model_path = model_config["path"]
     torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
@@ -146,24 +156,39 @@ def evaluate_local_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Use left padding for batch generation (standard for decoder models)
+    tokenizer.padding_side = "left"
+
     model.eval()
+
+    # Sort examples by sequence length (descending) to minimize padding
+    # and surface OOM errors early with longest sequences first
+    sorted_examples = sorted(examples, key=lambda x: x.sequence_length, reverse=True)
 
     results = []
 
-    for example in tqdm(examples, desc="  Evaluating"):
-        prompt = create_prompt(example)
+    # Process in batches
+    pbar = tqdm(total=len(sorted_examples), desc="  Evaluating")
+    for batch_start in range(0, len(sorted_examples), batch_size):
+        batch_examples = sorted_examples[batch_start:batch_start + batch_size]
 
-        # Wrap in chat format
-        if hasattr(tokenizer, 'apply_chat_template'):
-            messages = [{"role": "user", "content": prompt}]
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False
-            )
+        # Create prompts for the batch
+        prompts = []
+        for example in batch_examples:
+            prompt = create_prompt(example)
+            if hasattr(tokenizer, 'apply_chat_template'):
+                messages = [{"role": "user", "content": prompt}]
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False
+                )
+            prompts.append(prompt)
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        # Tokenize batch with padding
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+        input_lengths = [inputs.attention_mask[i].sum().item() for i in range(len(batch_examples))]
 
         with torch.no_grad():
             outputs = model.generate(
@@ -173,21 +198,29 @@ def evaluate_local_model(
                 pad_token_id=tokenizer.pad_token_id
             )
 
-        # Decode only the new tokens
-        response = tokenizer.decode(
-            outputs[0][inputs.input_ids.shape[1]:],
-            skip_special_tokens=True,
-        )
+        # Decode responses for each example in batch
+        for i, example in enumerate(batch_examples):
+            # Extract only the new tokens (skip input tokens)
+            input_len = input_lengths[i]
+            # With left padding, the real input starts at (total_len - input_len)
+            # So new tokens start at the original sequence length
+            padded_input_len = inputs.input_ids.shape[1]
+            new_tokens = outputs[i][padded_input_len:]
 
-        predicted_count = extract_count_from_response(response)
+            response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+            predicted_count = extract_count_from_response(response)
 
-        results.append({
-            "true_count": example.true_count,
-            "predicted_count": predicted_count,
-            "response": response[:50],  # Truncate for display
-            "correct": predicted_count == example.true_count,
-            "sequence_length": example.sequence_length,
-        })
+            results.append({
+                "true_count": example.true_count,
+                "predicted_count": predicted_count,
+                "response": response[:50],  # Truncate for display
+                "correct": predicted_count == example.true_count,
+                "sequence_length": example.sequence_length,
+                "target_token": example.target_token,
+            })
+
+        pbar.update(len(batch_examples))
+    pbar.close()
 
     # Clean up GPU memory
     del model
@@ -265,6 +298,7 @@ def evaluate_claude_model(
             "response": response[:50],
             "correct": predicted_count == example.true_count,
             "sequence_length": example.sequence_length,
+            "target_token": example.target_token,
         }
 
     async def run_all():
@@ -618,6 +652,12 @@ def main():
         help="Random seed for reproducibility (random by default)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size for local model evaluation (default: 1)",
+    )
+    parser.add_argument(
         "--show-examples",
         action="store_true",
         help="Show example outputs for each model",
@@ -681,12 +721,13 @@ def main():
             if device == "cpu":
                 print("Error: CUDA is required for local model evaluation. CPU is not supported.")
                 return
-            print(f"Using dtype: {args.dtype}")
+            print(f"Using dtype: {args.dtype}, batch_size: {args.batch_size}")
             result = evaluate_local_model(
                 examples=examples,
                 model_config=model_config,
                 device=device,
                 dtype=args.dtype,
+                batch_size=args.batch_size,
             )
         elif model_config["type"] == "api":
             result = evaluate_claude_model(

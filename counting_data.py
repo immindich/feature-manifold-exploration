@@ -6,10 +6,14 @@ for both evaluation (eval_counting.py) and activation extraction (activations.py
 """
 
 import random
+import string
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+# All uppercase letters for random target/distractor selection
+ALL_LETTERS = list(string.ascii_uppercase)
 
 
 @dataclass
@@ -31,7 +35,7 @@ class CountingSequence:
 
 
 def generate_counting_example(
-    target_token: str = "X",
+    target_token: str | None = None,
     other_tokens: list[str] | None = None,
     min_length: int = 10,
     max_length: int = 30,
@@ -42,8 +46,8 @@ def generate_counting_example(
     """Generate a random sequence with a known count of target tokens.
 
     Args:
-        target_token: The token to count (default: "X")
-        other_tokens: List of distractor tokens (default: ["A", "B", "C", "D", "E"])
+        target_token: The token to count. If None, randomly selects from A-Z.
+        other_tokens: List of distractor tokens. If None, uses all letters except target.
         min_length: Minimum sequence length
         max_length: Maximum sequence length
         target_freq: Base frequency of target token (used if vary_freq=False)
@@ -54,8 +58,10 @@ def generate_counting_example(
     Returns:
         CountingSequence with the generated sequence and ground truth count
     """
+    if target_token is None:
+        target_token = random.choice(ALL_LETTERS)
     if other_tokens is None:
-        other_tokens = ["A", "B", "C", "D", "E"]
+        other_tokens = [letter for letter in ALL_LETTERS if letter != target_token]
 
     length = random.randint(min_length, max_length)
 
@@ -107,7 +113,7 @@ def create_prompt(example: CountingSequence) -> str:
 def generate_sequence_with_target_count(
     target_count: int,
     length_range: tuple[int, int],
-    target_token: str = "X",
+    target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
     max_attempts: int = 50,
@@ -118,8 +124,8 @@ def generate_sequence_with_target_count(
     Args:
         target_count: Desired number of target tokens
         length_range: (min_length, max_length) for sequence
-        target_token: Token to count
-        other_tokens: Other tokens to include
+        target_token: Token to count. If None, randomly selects from A-Z.
+        other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio.
                       Wider range = lower count-length correlation.
                       Default (0.05, 0.8) gives r ≈ 0.4
@@ -128,8 +134,10 @@ def generate_sequence_with_target_count(
     Returns:
         CountingSequence or None if can't generate valid sequence
     """
+    if target_token is None:
+        target_token = random.choice(ALL_LETTERS)
     if other_tokens is None:
-        other_tokens = ["A", "B", "C", "D", "E"]
+        other_tokens = [letter for letter in ALL_LETTERS if letter != target_token]
 
     min_len, max_len = length_range
     min_density, max_density = density_range
@@ -184,7 +192,7 @@ def generate_uniform_count_sequences(
     max_count: int,
     num_sequences: int,
     length_range: tuple[int, int] = (50, 500),
-    target_token: str = "X",
+    target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
     seed: Optional[int] = None,
@@ -197,8 +205,8 @@ def generate_uniform_count_sequences(
         max_count: Maximum count value
         num_sequences: Total number of sequences to generate
         length_range: (min_length, max_length) for sequences
-        target_token: Token to count
-        other_tokens: Other tokens to include
+        target_token: Token to count. If None, each sequence gets a random target from A-Z.
+        other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio.
                       Default (0.05, 0.8) gives count-length correlation ≈ 0.4
         seed: Random seed for reproducibility
@@ -209,9 +217,6 @@ def generate_uniform_count_sequences(
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
-
-    if other_tokens is None:
-        other_tokens = ["A", "B", "C", "D", "E"]
 
     sequences = []
 
@@ -244,7 +249,7 @@ def generate_stratified_sequences(
     count_bins: list[tuple[int, int]],
     sequences_per_bin: int,
     length_range: tuple[int, int] = (50, 500),
-    target_token: str = "X",
+    target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
     seed: Optional[int] = None,
@@ -258,8 +263,8 @@ def generate_stratified_sequences(
         count_bins: List of (min_count, max_count) tuples defining bins
         sequences_per_bin: Number of sequences to generate per bin
         length_range: (min_length, max_length) for sequences
-        target_token: Token to count
-        other_tokens: Other tokens to include
+        target_token: Token to count. If None, each sequence gets a random target from A-Z.
+        other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio
         seed: Random seed for reproducibility
 
@@ -269,9 +274,6 @@ def generate_stratified_sequences(
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
-
-    if other_tokens is None:
-        other_tokens = ["A", "B", "C", "D", "E"]
 
     sequences = []
 
