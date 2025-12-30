@@ -110,44 +110,66 @@ def create_prompt(example: CountingSequence) -> str:
     )
 
 
+def format_chat_prompt(example: CountingSequence, tokenizer) -> str:
+    """Format a counting example as a chat message using the tokenizer's chat template.
+
+    Args:
+        example: The counting example
+        tokenizer: A tokenizer with apply_chat_template method
+
+    Returns:
+        Formatted chat prompt string
+    """
+    prompt = create_prompt(example)
+    if hasattr(tokenizer, 'apply_chat_template'):
+        messages = [{"role": "user", "content": prompt}]
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False
+        )
+    return prompt
+
+
 def generate_sequence_with_target_count(
     target_count: int,
-    length_range: tuple[int, int],
     target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
-    max_attempts: int = 50,
-) -> Optional[CountingSequence]:
+) -> CountingSequence:
     """
     Generate a sequence with exactly the target count.
 
     Args:
         target_count: Desired number of target tokens
-        length_range: (min_length, max_length) for sequence
         target_token: Token to count. If None, randomly selects from A-Z.
         other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio.
                       Wider range = lower count-length correlation.
                       Default (0.05, 0.8) gives r ≈ 0.4
-        max_attempts: Max attempts before giving up
 
     Returns:
-        CountingSequence or None if can't generate valid sequence
+        CountingSequence with the generated sequence
     """
     if target_token is None:
         target_token = random.choice(ALL_LETTERS)
     if other_tokens is None:
         other_tokens = [letter for letter in ALL_LETTERS if letter != target_token]
 
-    min_len, max_len = length_range
     min_density, max_density = density_range
 
     # Calculate valid length range for this count
     # length must satisfy: min_density <= count/length <= max_density
     # So: count/max_density <= length <= count/min_density
+    # For count=0, use the same range as count=1
+    effective_count = max(target_count, 1)
+    valid_len_min = int(np.ceil(effective_count / max_density))
+    valid_len_max = int(np.floor(effective_count / min_density))
+
     if target_count == 0:
         # Special case: just generate sequence with no target tokens
-        length = random.randint(min_len, max_len)
+        length = random.randint(valid_len_min, valid_len_max)
         tokens = [random.choice(other_tokens) for _ in range(length)]
         return CountingSequence(
             tokens=tokens,
@@ -156,42 +178,28 @@ def generate_sequence_with_target_count(
             target_token=target_token,
         )
 
-    valid_len_min = max(min_len, int(np.ceil(target_count / max_density)))
-    valid_len_max = min(max_len, int(np.floor(target_count / min_density)))
+    # Pick a length
+    length = random.randint(valid_len_min, valid_len_max)
 
-    if valid_len_min > valid_len_max:
-        # Can't generate this count within constraints
-        return None
+    # Generate sequence with exactly target_count target tokens
+    tokens = [target_token] * target_count + \
+             [random.choice(other_tokens) for _ in range(length - target_count)]
 
-    for _ in range(max_attempts):
-        # Pick a length
-        length = random.randint(valid_len_min, valid_len_max)
+    # Shuffle to randomize positions
+    random.shuffle(tokens)
 
-        # Generate sequence with exactly target_count target tokens
-        tokens = [target_token] * target_count + \
-                 [random.choice(other_tokens) for _ in range(length - target_count)]
-
-        # Shuffle to randomize positions
-        random.shuffle(tokens)
-
-        actual_count = tokens.count(target_token)
-        assert actual_count == target_count, f"Count mismatch: {actual_count} vs {target_count}"
-
-        return CountingSequence(
-            tokens=tokens,
-            sequence=" ".join(tokens),
-            true_count=target_count,
-            target_token=target_token,
-        )
-
-    return None
+    return CountingSequence(
+        tokens=tokens,
+        sequence=" ".join(tokens),
+        true_count=target_count,
+        target_token=target_token,
+    )
 
 
 def generate_uniform_count_sequences(
     min_count: int,
     max_count: int,
     num_sequences: int,
-    length_range: tuple[int, int] = (50, 500),
     target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
@@ -204,7 +212,6 @@ def generate_uniform_count_sequences(
         min_count: Minimum count value
         max_count: Maximum count value
         num_sequences: Total number of sequences to generate
-        length_range: (min_length, max_length) for sequences
         target_token: Token to count. If None, each sequence gets a random target from A-Z.
         other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio.
@@ -218,29 +225,18 @@ def generate_uniform_count_sequences(
         random.seed(seed)
         np.random.seed(seed)
 
-    sequences = []
-
     # Generate target counts uniformly
     target_counts = np.random.randint(min_count, max_count + 1, size=num_sequences)
 
-    failed_counts = []
-    for target_count in target_counts:
-        seq = generate_sequence_with_target_count(
+    sequences = [
+        generate_sequence_with_target_count(
             target_count=target_count,
-            length_range=length_range,
             target_token=target_token,
             other_tokens=other_tokens,
             density_range=density_range,
         )
-
-        if seq is not None:
-            sequences.append(seq)
-        else:
-            failed_counts.append(target_count)
-
-    if failed_counts:
-        print(f"Warning: Could not generate {len(failed_counts)} sequences")
-        print(f"  Failed counts: {set(failed_counts)}")
+        for target_count in target_counts
+    ]
 
     return sequences
 
@@ -248,7 +244,6 @@ def generate_uniform_count_sequences(
 def generate_stratified_sequences(
     count_bins: list[tuple[int, int]],
     sequences_per_bin: int,
-    length_range: tuple[int, int] = (50, 500),
     target_token: str | None = None,
     other_tokens: list[str] | None = None,
     density_range: tuple[float, float] = (0.05, 0.8),
@@ -262,7 +257,6 @@ def generate_stratified_sequences(
     Args:
         count_bins: List of (min_count, max_count) tuples defining bins
         sequences_per_bin: Number of sequences to generate per bin
-        length_range: (min_length, max_length) for sequences
         target_token: Token to count. If None, each sequence gets a random target from A-Z.
         other_tokens: Other tokens to include. If None, uses all letters except target.
         density_range: Acceptable range for count/length ratio
@@ -282,7 +276,6 @@ def generate_stratified_sequences(
             min_count=bin_min,
             max_count=bin_max,
             num_sequences=sequences_per_bin,
-            length_range=length_range,
             target_token=target_token,
             other_tokens=other_tokens,
             density_range=density_range,

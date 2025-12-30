@@ -19,8 +19,8 @@ Usage:
     # Evaluate Claude 4.5 Sonnet
     python eval_counting.py --model claude
 
-    # Test different sequence lengths
-    python eval_counting.py --model claude --num-samples 200 --min-length 30 --max-length 100
+    # Test different count ranges
+    python eval_counting.py --model claude --num-samples 200 --min-count 0 --max-count 100
 
     # Detailed analysis with plot
     python eval_counting.py --model claude --analyze-bins --show-examples --plot results.png
@@ -47,6 +47,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from counting_data import (
     CountingSequence,
     create_prompt,
+    format_chat_prompt,
     generate_uniform_count_sequences,
 )
 
@@ -173,18 +174,7 @@ def evaluate_local_model(
         batch_examples = sorted_examples[batch_start:batch_start + batch_size]
 
         # Create prompts for the batch
-        prompts = []
-        for example in batch_examples:
-            prompt = create_prompt(example)
-            if hasattr(tokenizer, 'apply_chat_template'):
-                messages = [{"role": "user", "content": prompt}]
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False
-                )
-            prompts.append(prompt)
+        prompts = [format_chat_prompt(example, tokenizer) for example in batch_examples]
 
         # Tokenize batch with padding
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
@@ -634,16 +624,9 @@ def main():
         help="Maximum target count",
     )
     parser.add_argument(
-        "--min-length",
-        type=int,
-        default=10,
-        help="Minimum sequence length",
-    )
-    parser.add_argument(
-        "--max-length",
-        type=int,
-        default=100,
-        help="Maximum sequence length",
+        "--target-only",
+        action="store_true",
+        help="Generate sequences containing only the target token (no distractors)",
     )
     parser.add_argument(
         "--seed",
@@ -704,12 +687,15 @@ def main():
             torch.manual_seed(args.seed)
 
         # Generate test examples
+        # Set density range based on target-only flag
+        density_range = (1.0, 1.0) if args.target_only else (0.05, 0.8)
+
         print(f"Generating {args.num_samples} test examples (count range: {args.min_count}-{args.max_count})...")
         examples = generate_uniform_count_sequences(
             min_count=args.min_count,
             max_count=args.max_count,
             num_sequences=args.num_samples,
-            length_range=(args.min_length, args.max_length),
+            density_range=density_range,
             seed=args.seed,
         )
 
