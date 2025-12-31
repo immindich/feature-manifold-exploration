@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from counting_data import CountingSequence, generate_sequence_with_target_count, format_chat_prompt
 from models import AVAILABLE_MODELS
+from token_mapping import find_sequence_token_positions
 
 torch.set_grad_enabled(False)
 
@@ -40,25 +41,23 @@ def extract_activations_for_batch(
     prompts = [format_chat_prompt(seq, tokenizer) for seq in sequences]
     tokenizer.padding_side = "left"
     tokens = tokenizer(prompts, return_tensors="pt", padding=True)
-    input_ids = tokens.input_ids
-    attention_mask = tokens.attention_mask
 
     layer_activations = []
 
-    with model.trace(input_ids) as tracer:
+    with model.trace(tokens) as tracer:
         for layer_idx in target_layers:
             hidden_states = model.model.language_model.layers[layer_idx].output[0]
             layer_activations.append(hidden_states.save())
 
     # layer_activations[layer] has shape (batch, seq_len, hidden_dim)
     # Stack to (num_layers, batch, seq_len, hidden_dim)
-    stacked = torch.stack([act for act in layer_activations])
+    stacked = torch.stack(layer_activations)
 
     # Extract per-sequence activations, removing padding
     results = []
     for batch_idx in range(len(sequences)):
         # Find where actual tokens start (non-padded region)
-        seq_mask = attention_mask[batch_idx]
+        seq_mask = tokens.attention_mask[batch_idx]
         seq_len = seq_mask.sum().item()
 
         # Extract this sequence's activations (last seq_len tokens)
@@ -66,6 +65,23 @@ def extract_activations_for_batch(
         results.append(seq_activations)
 
     return results
+
+
+def parse_layer_spec(spec: str) -> list[int]:
+    """Parse a layer specification string into a list of layer indices.
+
+    Supports comma-separated values and ranges (inclusive).
+    Example: "4,5,7-9,12" -> [4, 5, 7, 8, 9, 12]
+    """
+    layers = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            start, end = part.split("-", 1)
+            layers.extend(range(int(start), int(end) + 1))
+        else:
+            layers.append(int(part))
+    return sorted(set(layers))
 
 
 def generate_sequences_per_count(
@@ -121,7 +137,16 @@ def main():
         default=8,
         help="Batch size for activation extraction (default: 8)",
     )
+    parser.add_argument(
+        "--layers",
+        type=str,
+        default=None,
+        help="Layers to extract (default: all). Comma-separated with ranges, e.g. '4,5,7-9,12'",
+    )
     args = parser.parse_args()
+
+    # Parse layers argument
+    target_layers = parse_layer_spec(args.layers) if args.layers else None
 
     # Load model
     model_config = AVAILABLE_MODELS[args.model]
@@ -129,6 +154,13 @@ def main():
     print(f"Loading model: {model_path}")
     model = LanguageModel(model_path, device_map="auto", dtype=torch.bfloat16)
     tokenizer = model.tokenizer
+
+    # Report layer selection
+    n_layers = len(model.model.language_model.layers)
+    if target_layers:
+        print(f"Extracting layers: {target_layers} (of {n_layers} total)")
+    else:
+        print(f"Extracting all {n_layers} layers")
 
     # Generate sequences
     total_sequences = (args.max_count - args.min_count + 1) * args.sequences_per_count
@@ -147,15 +179,23 @@ def main():
     pbar = tqdm(total=len(examples))
     for batch_start in range(0, len(examples), args.batch_size):
         batch_examples = examples[batch_start:batch_start + args.batch_size]
-        batch_activations = extract_activations_for_batch(model, tokenizer, batch_examples)
+        batch_activations = extract_activations_for_batch(model, tokenizer, batch_examples, layers=target_layers)
 
         for example, activations in zip(batch_examples, batch_activations):
+            # Get token position mappings
+            prompt = format_chat_prompt(example, tokenizer)
+            token_positions = find_sequence_token_positions(
+                tokenizer, prompt, example.tokens, target_token=example.target_token
+            )
+
             all_activations.append(activations)
             all_metadata.append({
                 "true_count": example.true_count,
                 "sequence": example.sequence,
                 "target_token": example.target_token,
                 "sequence_length": example.sequence_length,
+                "tokens": example.tokens,
+                "token_positions": token_positions,
             })
 
         pbar.update(len(batch_examples))
@@ -167,6 +207,7 @@ def main():
         "activations": all_activations,
         "metadata": all_metadata,
         "model_name": args.model,
+        "layers": target_layers if target_layers else list(range(n_layers)),
         "args": vars(args),
     }
     torch.save(save_data, args.output)
