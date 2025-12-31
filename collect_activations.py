@@ -3,7 +3,7 @@
 Extract residual stream activations for counting task sequences.
 
 Usage:
-    python activations_prototype.py --model gemma-12b --min-count 1 --max-count 50 --sequences-per-count 10 --output activations.pt
+    python collect_activations.py --model gemma-12b --min-count 1 --max-count 50 --sequences-per-count 10 --output activations.pt
 """
 
 import argparse
