@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import gc
 
 import torch
 from nnsight import LanguageModel
@@ -27,12 +28,17 @@ def extract_activations_for_batch(
     tokenizer,
     sequences: list[CountingSequence],
     layers: list[int] = None,
+    last_token_only: bool = False,
 ) -> list[torch.Tensor]:
     """
     Extract residual stream activations for a batch of sequences.
 
+    Args:
+        last_token_only: If True, only extract the last token's activations (saves memory)
+
     Returns:
-        List of tensors, each of shape (num_layers, seq_len, hidden_dim)
+        List of tensors, each of shape (num_layers, seq_len, hidden_dim) or
+        (num_layers, hidden_dim) if last_token_only=True
     """
     n_layers = len(model.model.language_model.layers)
     target_layers = list(range(n_layers)) if layers is None else layers
@@ -47,24 +53,39 @@ def extract_activations_for_batch(
     with model.trace(tokens) as tracer:
         for layer_idx in target_layers:
             hidden_states = model.model.language_model.layers[layer_idx].output[0]
-            layer_activations.append(hidden_states.save())
+            if last_token_only:
+                # Only save the last token position (saves memory)
+                layer_activations.append(hidden_states[:, -1, :].save())
+            else:
+                layer_activations.append(hidden_states.save())
 
-    # layer_activations[layer] has shape (batch, seq_len, hidden_dim)
-    # Stack to (num_layers, batch, seq_len, hidden_dim)
-    stacked = torch.stack(layer_activations)
+    if last_token_only:
+        # layer_activations[layer] has shape (batch, hidden_dim)
+        # Stack to (num_layers, batch, hidden_dim)
+        stacked = torch.stack(layer_activations)
+        # Return list of (num_layers, hidden_dim) tensors
+        results = [stacked[:, i, :].cpu().clone() for i in range(len(sequences))]
+        del stacked, layer_activations
+        return results
+    else:
+        # layer_activations[layer] has shape (batch, seq_len, hidden_dim)
+        # Stack to (num_layers, batch, seq_len, hidden_dim)
+        stacked = torch.stack(layer_activations)
+        del layer_activations
 
-    # Extract per-sequence activations, removing padding
-    results = []
-    for batch_idx in range(len(sequences)):
-        # Find where actual tokens start (non-padded region)
-        seq_mask = tokens.attention_mask[batch_idx]
-        seq_len = seq_mask.sum().item()
+        # Extract per-sequence activations, removing padding
+        results = []
+        for batch_idx in range(len(sequences)):
+            # Find where actual tokens start (non-padded region)
+            seq_mask = tokens.attention_mask[batch_idx]
+            seq_len = seq_mask.sum().item()
 
-        # Extract this sequence's activations (last seq_len tokens)
-        seq_activations = stacked[:, batch_idx, -seq_len:, :].cpu()
-        results.append(seq_activations)
+            # Extract this sequence's activations (last seq_len tokens)
+            seq_activations = stacked[:, batch_idx, -seq_len:, :].cpu().clone()
+            results.append(seq_activations)
 
-    return results
+        del stacked
+        return results
 
 
 def parse_layer_spec(spec: str) -> list[int]:
@@ -88,12 +109,13 @@ def generate_sequences_per_count(
     min_count: int,
     max_count: int,
     sequences_per_count: int,
+    density_range: tuple[float, float] = (0.05, 0.8),
 ) -> list[CountingSequence]:
     """Generate a fixed number of sequences for each count value."""
     examples = []
     for count in range(min_count, max_count + 1):
         for _ in range(sequences_per_count):
-            examples.append(generate_sequence_with_target_count(count))
+            examples.append(generate_sequence_with_target_count(count, density_range=density_range))
     return examples
 
 
@@ -143,6 +165,16 @@ def main():
         default=None,
         help="Layers to extract (default: all). Comma-separated with ranges, e.g. '4,5,7-9,12'",
     )
+    parser.add_argument(
+        "--mean-only",
+        action="store_true",
+        help="Only save mean activations per count at the last token position",
+    )
+    parser.add_argument(
+        "--target-only",
+        action="store_true",
+        help="Generate sequences containing only the target token (no distractors)",
+    )
     args = parser.parse_args()
 
     # Parse layers argument
@@ -163,55 +195,100 @@ def main():
         print(f"Extracting all {n_layers} layers")
 
     # Generate sequences
+    density_range = (1.0, 1.0) if args.target_only else (0.05, 0.8)
     total_sequences = (args.max_count - args.min_count + 1) * args.sequences_per_count
-    print(f"Generating {total_sequences} sequences (counts {args.min_count}-{args.max_count}, {args.sequences_per_count} per count)")
+    mode_str = "target-only" if args.target_only else "mixed"
+    print(f"Generating {total_sequences} sequences (counts {args.min_count}-{args.max_count}, {args.sequences_per_count} per count, {mode_str})")
     examples = generate_sequences_per_count(
         min_count=args.min_count,
         max_count=args.max_count,
         sequences_per_count=args.sequences_per_count,
+        density_range=density_range,
     )
+    # Sort by sequence length descending for more efficient batching (less padding waste)
+    examples.sort(key=lambda x: x.sequence_length, reverse=True)
 
     # Extract activations
     print(f"Extracting activations (batch_size={args.batch_size})...")
-    all_activations = []
-    all_metadata = []
 
+    # Setup accumulators based on mode
+    import numpy as np
+    if args.mean_only:
+        unique_counts = list(range(args.min_count, args.max_count + 1))
+        count_to_idx = {c: i for i, c in enumerate(unique_counts)}
+        n_layers_actual = len(target_layers) if target_layers else n_layers
+        sum_activations = None
+        count_samples = np.zeros(len(unique_counts), dtype=np.int32)
+    else:
+        all_activations = []
+        all_metadata = []
+
+    # Single batch loop
     pbar = tqdm(total=len(examples))
     for batch_start in range(0, len(examples), args.batch_size):
         batch_examples = examples[batch_start:batch_start + args.batch_size]
-        batch_activations = extract_activations_for_batch(model, tokenizer, batch_examples, layers=target_layers)
+        batch_activations = extract_activations_for_batch(
+            model, tokenizer, batch_examples,
+            layers=target_layers,
+            last_token_only=args.mean_only,
+        )
 
         for example, activations in zip(batch_examples, batch_activations):
-            # Get token position mappings
-            prompt = format_chat_prompt(example, tokenizer)
-            token_positions = find_sequence_token_positions(
-                tokenizer, prompt, example.tokens, target_token=example.target_token
-            )
-
-            all_activations.append(activations)
-            all_metadata.append({
-                "true_count": example.true_count,
-                "sequence": example.sequence,
-                "target_token": example.target_token,
-                "sequence_length": example.sequence_length,
-                "tokens": example.tokens,
-                "token_positions": token_positions,
-            })
+            if args.mean_only:
+                # Accumulate for mean calculation
+                # activations shape: (n_layers, hidden_dim)
+                if sum_activations is None:
+                    hidden_dim = activations.shape[1]
+                    sum_activations = torch.zeros((n_layers_actual, len(unique_counts), hidden_dim), dtype=torch.float32)
+                count_idx = count_to_idx[example.true_count]
+                sum_activations[:, count_idx, :] += activations.float()
+                count_samples[count_idx] += 1
+            else:
+                # Store full activations with metadata
+                prompt = format_chat_prompt(example, tokenizer)
+                token_positions = find_sequence_token_positions(
+                    tokenizer, prompt, example.tokens, target_token=example.target_token
+                )
+                all_activations.append(activations)
+                all_metadata.append({
+                    "true_count": example.true_count,
+                    "sequence": example.sequence,
+                    "target_token": example.target_token,
+                    "sequence_length": example.sequence_length,
+                    "tokens": example.tokens,
+                    "token_positions": token_positions,
+                })
 
         pbar.update(len(batch_examples))
+        del batch_activations
+        gc.collect()
         torch.cuda.empty_cache()
     pbar.close()
 
-    # Save to disk
-    save_data = {
-        "activations": all_activations,
-        "metadata": all_metadata,
-        "model_name": args.model,
-        "layers": target_layers if target_layers else list(range(n_layers)),
-        "args": vars(args),
-    }
-    torch.save(save_data, args.output)
-    print(f"Saved activations to: {args.output}")
+    # Save based on mode
+    if args.mean_only:
+        mean_activations = sum_activations / torch.tensor(count_samples).view(1, -1, 1)
+        save_data = {
+            "mean_activations": mean_activations,
+            "counts": np.array(unique_counts),
+            "model_name": args.model,
+            "layers": target_layers if target_layers else list(range(n_layers)),
+            "args": vars(args),
+            "sequences_per_count": args.sequences_per_count,
+        }
+        torch.save(save_data, args.output)
+        print(f"Saved mean activations to: {args.output}")
+        print(f"  Shape: {mean_activations.shape} (n_layers, n_counts, hidden_dim)")
+    else:
+        save_data = {
+            "activations": all_activations,
+            "metadata": all_metadata,
+            "model_name": args.model,
+            "layers": target_layers if target_layers else list(range(n_layers)),
+            "args": vars(args),
+        }
+        torch.save(save_data, args.output)
+        print(f"Saved activations to: {args.output}")
 
 
 if __name__ == "__main__":
