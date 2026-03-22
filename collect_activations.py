@@ -230,7 +230,7 @@ def main():
         batch_activations = extract_activations_for_batch(
             model, tokenizer, batch_examples,
             layers=target_layers,
-            last_token_only=args.mean_only,
+            last_token_only=True,
         )
 
         for example, activations in zip(batch_examples, batch_activations):

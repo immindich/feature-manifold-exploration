@@ -1,4 +1,8 @@
 .venv
 .env
 .claude
+.git-credentials
 __pycache__/
+*.json
+*.png
+*.pt
