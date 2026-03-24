@@ -8,24 +8,27 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from counting_data import CountingSequence, create_prompt, format_chat_prompt
 from eval_counting import extract_count_from_response
+from metrics import compute_prediction_metrics
 from models import AVAILABLE_MODELS
 from train_probes import LinearProbe, MLPProbe, load_data, split_train_val_test
 
 
-def compute_metrics(true, pred):
+def compute_bias_corrected_metrics(true, pred):
     """Compute bias-corrected metrics: fit a linear regression from pred to true,
     then report residual MSE, MAE, R², and Pearson correlation."""
-    true, pred = np.array(true, dtype=float), np.array(pred, dtype=float)
+    true, pred = np.asarray(true, dtype=float), np.asarray(pred, dtype=float)
     coeffs = np.polyfit(pred, true, 1)
     corrected = np.polyval(coeffs, pred)
-    mse = np.mean((corrected - true) ** 2)
-    mae = np.mean(np.abs(corrected - true))
-    ss_res = np.sum((true - corrected) ** 2)
-    ss_tot = np.sum((true - true.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    corr = np.corrcoef(true, pred)[0, 1] if len(true) > 1 else 0.0
-    slope = coeffs[0]
-    return {"mse": mse, "mae": mae, "r2": r2, "corr": corr, "slope": slope, "n": len(true)}
+    corrected_metrics = compute_prediction_metrics(true, corrected)
+    raw_metrics = compute_prediction_metrics(true, pred)
+    return {
+        "mse": corrected_metrics["mse"],
+        "mae": corrected_metrics["mae"],
+        "r2": corrected_metrics["r2"],
+        "corr": raw_metrics["corr"],
+        "slope": coeffs[0],
+        "n": len(true),
+    }
 
 
 def print_comparison_table(rows, title):
@@ -160,12 +163,12 @@ for title, lo, hi in ranges:
     mask_model_valid = mask & model_valid
 
     rows = []
-    rows.append({"label": "Gemma-27B (model)", **compute_metrics(
+    rows.append({"label": "Gemma-27B (model)", **compute_bias_corrected_metrics(
         test_counts_np[mask_model_valid], model_preds[mask_model_valid])})
     for layer in probe_layers:
-        rows.append({"label": f"Linear probe (L{layer})", **compute_metrics(
+        rows.append({"label": f"Linear probe (L{layer})", **compute_bias_corrected_metrics(
             test_counts_np[mask], probe_results[("linear", layer)][mask])})
     for layer in probe_layers:
-        rows.append({"label": f"MLP probe (L{layer})", **compute_metrics(
+        rows.append({"label": f"MLP probe (L{layer})", **compute_bias_corrected_metrics(
             test_counts_np[mask], probe_results[("mlp", layer)][mask])})
     print_comparison_table(rows, title)

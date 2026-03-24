@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+from plotting import scatter_true_vs_predicted
 from train_probes import LinearProbe, MLPProbe, load_data, split_train_test
 
 DATA_PATH = "activations-27b.pt"
@@ -42,19 +43,7 @@ fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 axes = axes.flatten()
 
 for i, (layer, pred) in enumerate(predictions.items()):
-    ax = axes[i]
-    ax.scatter(test_counts, pred, s=8, alpha=0.3)
-    lo, hi = test_counts.min(), test_counts.max()
-    ax.plot([lo, hi], [lo, hi], color="red", linewidth=1, linestyle="--", label="y=x")
-    ax.set_xlabel("Actual count")
-    ax.set_ylabel("Predicted count")
-    mae = np.abs(pred - test_counts).mean()
-    r2 = 1 - np.sum((pred - test_counts) ** 2) / np.sum((test_counts - test_counts.mean()) ** 2)
-    ax.set_title(f"Layer {layer} (MAE={mae:.1f}, R²={r2:.3f})")
-    ax.legend(loc="upper left")
-    ax.set_aspect("equal")
-    ax.set_xlim(lo - 5, hi + 5)
-    ax.set_ylim(lo - 5, hi + 5)
+    scatter_true_vs_predicted(axes[i], test_counts, pred, title=f"Layer {layer}")
 
 fig.suptitle(f"{probe_type.upper()} Probe: Predicted vs Actual Count (Test Set)", fontsize=14)
 plt.tight_layout()

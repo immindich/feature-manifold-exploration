@@ -32,8 +32,9 @@ from counting_data import (
     format_chat_prompt,
     generate_uniform_count_sequences,
 )
-
+from metrics import compute_prediction_metrics
 from models import AVAILABLE_MODELS
+from plotting import scatter_true_vs_predicted
 
 # Load environment variables
 load_dotenv()
@@ -270,35 +271,15 @@ def _compute_metrics(results: list[dict], model_name: str) -> dict:
     accuracy = sum(r["correct"] for r in results) / len(results)
     parse_rate = len(valid_results) / len(results)
 
-    # Correlation (only for parsed results)
-    if len(valid_results) > 1:
-        true_counts = [r["true_count"] for r in valid_results]
-        pred_counts = [r["predicted_count"] for r in valid_results]
-
-        # Pearson correlation
-        mean_true = sum(true_counts) / len(true_counts)
-        mean_pred = sum(pred_counts) / len(pred_counts)
-
-        numerator = sum((t - mean_true) * (p - mean_pred) for t, p in zip(true_counts, pred_counts))
-        denom_true = sum((t - mean_true) ** 2 for t in true_counts) ** 0.5
-        denom_pred = sum((p - mean_pred) ** 2 for p in pred_counts) ** 0.5
-
-        if denom_true > 0 and denom_pred > 0:
-            correlation = numerator / (denom_true * denom_pred)
-        else:
-            correlation = 0.0
-
-        # Mean absolute error
-        mae = sum(abs(t - p) for t, p in zip(true_counts, pred_counts)) / len(valid_results)
-    else:
-        correlation = 0.0
-        mae = float('inf')
+    true_counts = [r["true_count"] for r in valid_results]
+    pred_counts = [r["predicted_count"] for r in valid_results]
+    metrics = compute_prediction_metrics(true_counts, pred_counts)
 
     return {
         "model_name": model_name,
         "accuracy": accuracy,
-        "correlation": correlation,
-        "mae": mae,
+        "correlation": metrics["corr"],
+        "mae": metrics["mae"],
         "parse_rate": parse_rate,
         "num_examples": len(results),
         "results": results,
@@ -392,27 +373,13 @@ def analyze_by_bins(results: dict, bin_type: str = "count"):
             continue
 
         acc = sum(r['correct'] for r in bin_results) / len(bin_results)
-        mae = sum(abs(r['true_count'] - r['predicted_count']) for r in bin_results) / len(bin_results)
-        avg_pred = sum(r['predicted_count'] for r in bin_results) / len(bin_results)
-        avg_true = sum(r['true_count'] for r in bin_results) / len(bin_results)
-
-        # Compute correlation within bin
-        if len(bin_results) > 1:
-            true_counts = [r['true_count'] for r in bin_results]
-            pred_counts = [r['predicted_count'] for r in bin_results]
-            mean_true = sum(true_counts) / len(true_counts)
-            mean_pred = sum(pred_counts) / len(pred_counts)
-
-            numerator = sum((t - mean_true) * (p - mean_pred) for t, p in zip(true_counts, pred_counts))
-            denom_true = sum((t - mean_true) ** 2 for t in true_counts) ** 0.5
-            denom_pred = sum((p - mean_pred) ** 2 for p in pred_counts) ** 0.5
-
-            if denom_true > 0 and denom_pred > 0:
-                corr = numerator / (denom_true * denom_pred)
-            else:
-                corr = 0.0
-        else:
-            corr = 0.0
+        true_counts = [r['true_count'] for r in bin_results]
+        pred_counts = [r['predicted_count'] for r in bin_results]
+        bin_metrics = compute_prediction_metrics(true_counts, pred_counts)
+        mae = bin_metrics["mae"]
+        corr = bin_metrics["corr"]
+        avg_pred = sum(pred_counts) / len(pred_counts)
+        avg_true = sum(true_counts) / len(true_counts)
 
         # Prediction diversity
         pred_counter = Counter(r['predicted_count'] for r in bin_results)
@@ -441,33 +408,13 @@ def create_scatter_plot(results: dict, output_file: str = "counting_performance.
     true_counts = [r['true_count'] for r in valid_results]
     pred_counts = [r['predicted_count'] for r in valid_results]
     seq_lengths = [r['sequence_length'] for r in valid_results]
-    correct = [r['correct'] for r in valid_results]
 
     # Create figure with multiple subplots
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 
     # Subplot 1: Predicted vs True with perfect line
-    ax1 = axes[0, 0]
-    colors = ['green' if c else 'red' for c in correct]
-    ax1.scatter(true_counts, pred_counts, c=colors, alpha=0.6, s=50)
-
-    # Add perfect prediction line
-    max_count = max(max(true_counts), max(pred_counts))
-    ax1.plot([0, max_count], [0, max_count], 'k--', linewidth=2, label='Perfect prediction')
-
-    # Add best fit line
-    coeffs = np.polyfit(true_counts, pred_counts, 1)
-    fit_line = np.poly1d(coeffs)
-    x_fit = np.linspace(0, max_count, 100)
-    ax1.plot(x_fit, fit_line(x_fit), 'b-', linewidth=2, alpha=0.7,
-             label=f'Best fit: y={coeffs[0]:.2f}x+{coeffs[1]:.2f}')
-
-    ax1.set_xlabel('True Count', fontsize=12)
-    ax1.set_ylabel('Predicted Count', fontsize=12)
-    ax1.set_title(f'{results["model_name"]}: Predicted vs True Count\\nAccuracy: {results["accuracy"]:.1%}, Correlation: {results["correlation"]:.3f}',
-                  fontsize=13, fontweight='bold')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    scatter_true_vs_predicted(axes[0, 0], true_counts, pred_counts,
+                              title=f'{results["model_name"]}')
 
     # Subplot 2: Error vs True Count
     ax2 = axes[0, 1]
@@ -497,7 +444,6 @@ def create_scatter_plot(results: dict, output_file: str = "counting_performance.
 
     # Subplot 4: Accuracy by Count Bins
     ax4 = axes[1, 1]
-    from collections import Counter
 
     # Determine bins based on data range
     max_true = max(true_counts)
@@ -538,13 +484,6 @@ def create_scatter_plot(results: dict, output_file: str = "counting_performance.
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f'\nScatter plot saved to: {output_file}')
-
-    # Print additional statistics
-    print(f'\nPlot statistics:')
-    print(f'  Best fit slope: {coeffs[0]:.3f} (1.0 = perfect)')
-    print(f'  Best fit intercept: {coeffs[1]:.2f} (0.0 = no bias)')
-    print(f'  Mean error: {np.mean(errors):.2f}')
-    print(f'  Std error: {np.std(errors):.2f}')
 
 
 def main():
