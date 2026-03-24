@@ -28,17 +28,12 @@ def extract_activations_for_batch(
     tokenizer,
     sequences: list[CountingSequence],
     layers: list[int] = None,
-    last_token_only: bool = False,
 ) -> list[torch.Tensor]:
     """
-    Extract residual stream activations for a batch of sequences.
-
-    Args:
-        last_token_only: If True, only extract the last token's activations (saves memory)
+    Extract last-token residual stream activations for a batch of sequences.
 
     Returns:
-        List of tensors, each of shape (num_layers, seq_len, hidden_dim) or
-        (num_layers, hidden_dim) if last_token_only=True
+        List of tensors, each of shape (num_layers, hidden_dim)
     """
     n_layers = len(model.model.language_model.layers)
     target_layers = list(range(n_layers)) if layers is None else layers
@@ -53,39 +48,15 @@ def extract_activations_for_batch(
     with model.trace(tokens) as tracer:
         for layer_idx in target_layers:
             hidden_states = model.model.language_model.layers[layer_idx].output[0]
-            if last_token_only:
-                # Only save the last token position (saves memory)
-                layer_activations.append(hidden_states[:, -1, :].save())
-            else:
-                layer_activations.append(hidden_states.save())
+            layer_activations.append(hidden_states[:, -1, :].save())
 
-    if last_token_only:
-        # layer_activations[layer] has shape (batch, hidden_dim)
-        # Stack to (num_layers, batch, hidden_dim)
-        stacked = torch.stack(layer_activations)
-        # Return list of (num_layers, hidden_dim) tensors
-        results = [stacked[:, i, :].cpu().clone() for i in range(len(sequences))]
-        del stacked, layer_activations
-        return results
-    else:
-        # layer_activations[layer] has shape (batch, seq_len, hidden_dim)
-        # Stack to (num_layers, batch, seq_len, hidden_dim)
-        stacked = torch.stack(layer_activations)
-        del layer_activations
-
-        # Extract per-sequence activations, removing padding
-        results = []
-        for batch_idx in range(len(sequences)):
-            # Find where actual tokens start (non-padded region)
-            seq_mask = tokens.attention_mask[batch_idx]
-            seq_len = seq_mask.sum().item()
-
-            # Extract this sequence's activations (last seq_len tokens)
-            seq_activations = stacked[:, batch_idx, -seq_len:, :].cpu().clone()
-            results.append(seq_activations)
-
-        del stacked
-        return results
+    # layer_activations[layer] has shape (batch, hidden_dim)
+    # Stack to (num_layers, batch, hidden_dim)
+    stacked = torch.stack(layer_activations)
+    # Return list of (num_layers, hidden_dim) tensors
+    results = [stacked[:, i, :].cpu().clone() for i in range(len(sequences))]
+    del stacked, layer_activations
+    return results
 
 
 def parse_layer_spec(spec: str) -> list[int]:
@@ -216,7 +187,6 @@ def main():
         batch_activations = extract_activations_for_batch(
             model, tokenizer, batch_examples,
             layers=target_layers,
-            last_token_only=True,
         )
 
         for example, activations in zip(batch_examples, batch_activations):
@@ -235,6 +205,8 @@ def main():
             })
 
         pbar.update(len(batch_examples))
+
+        # NNSight will leak memory if we don't do this explicitly
         del batch_activations
         gc.collect()
         torch.cuda.empty_cache()
