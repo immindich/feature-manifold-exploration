@@ -4,13 +4,15 @@ Investigating how language models internally represent counts, and why their int
 
 ## Setup
 
+Set up an environment and then install the required Python dependencies.
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install torch transformers anthropic python-dotenv numpy tqdm matplotlib scikit-learn nnsight
 ```
 
 If you are using Gemma, you need to follow the instructions in the repo to get access to the weights and authenticate with Hugging Face. Set `ANTHROPIC_API_KEY` for Claude evaluation.
+
+Running models locally requires quite a bit of VRAM. I did these experiments on a 96GB GH200 instance. Unfortunately, smaller models than Gemma don't do very well on the counting task.
 
 ## Scripts
 
@@ -25,7 +27,7 @@ python eval_counting.py --load results.json --plot results.png
 
 ### `collect_activations.py`
 
-Extracts residual stream activations from Gemma models at specified layers using nnsight. Generates counting task sequences and saves per-example activations (at the last token position) along with metadata.
+Extracts residual stream activations from Gemma models at specified layers.
 
 ```bash
 python collect_activations.py --model gemma-27b --min-count 1 --max-count 150 --sequences-per-count 80 --layers 5,15,25,35,45,55 --output activations-27b.pt
@@ -47,7 +49,3 @@ python train_probes.py --data activations-27b.pt --model mlp --mlp-hidden 128 --
 ### `compare_probe_vs_model.py`
 
 Runs the model on the same test set used for probe evaluation and compares bias-corrected metrics across count ranges.
-
-```bash
-python compare_probe_vs_model.py
-```
