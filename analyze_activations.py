@@ -10,7 +10,6 @@ ACTIVATIONS_PATH = "activations-27b.pt"
 
 data = torch.load(ACTIVATIONS_PATH, weights_only=False)
 
-# %% Inspect saved data structure
 print("Keys in saved data:", list(data.keys()))
 print(f"Model: {data['model_name']}")
 print(f"Layers extracted: {data['layers']}")
@@ -240,34 +239,9 @@ def plot_3d_pca_interactive(layer_idx: int, components: tuple[int, int, int] = (
 
 plot_projection(3, 0,)
 plt.show()
-# %%
-plot_projection(8, 1)
-plt.show()
-
-# %%
-plot_projection(8, 2)
-plt.show()
-# %%
-plot_projection(8, 3)
-plt.show()
-# %%
-plot_projection(8, 4)
-plt.show()
-# %%
-plot_projection(8, 5)
-plt.show()
-# %%
-plot_projection(2, 6)
-plt.show()
 
 # %%
 plot_3d_pca_interactive(4, (0, 1, 2), draw_line=True, show_test=True)
-# %%
-plot_3d_pca_interactive(2, (1, 3, 4), draw_line=True)
-# %%
-plot_3d_pca_interactive(5, (2, 3, 4), draw_line=True)
-# %%
-plot_3d_pca_interactive(1, (0, 1, 5))
 
 # %% Pairwise cosine similarity of mean activation vectors
 from sklearn.metrics.pairwise import cosine_similarity
