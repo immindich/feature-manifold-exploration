@@ -10,11 +10,10 @@ import argparse
 import gc
 
 import torch
-import numpy as np
 from nnsight import LanguageModel
 from tqdm import tqdm
 
-from counting_data import CountingSequence, generate_sequence_with_target_count, format_chat_prompt
+from counting_data import CountingSequence, generate_sequences_per_count, format_chat_prompt
 from models import AVAILABLE_MODELS
 
 torch.set_grad_enabled(False)
@@ -73,20 +72,6 @@ def parse_layer_spec(spec: str) -> list[int]:
         else:
             layers.append(int(part))
     return sorted(set(layers))
-
-
-def generate_sequences_per_count(
-    min_count: int,
-    max_count: int,
-    sequences_per_count: int,
-    density_range: tuple[float, float] = (0.05, 0.8),
-) -> list[CountingSequence]:
-    """Generate a fixed number of sequences for each count value."""
-    examples = []
-    for count in range(min_count, max_count + 1):
-        for _ in range(sequences_per_count):
-            examples.append(generate_sequence_with_target_count(count, density_range=density_range))
-    return examples
 
 
 def main():

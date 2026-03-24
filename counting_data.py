@@ -196,6 +196,20 @@ def generate_sequence_with_target_count(
     )
 
 
+def generate_sequences_per_count(
+    min_count: int,
+    max_count: int,
+    sequences_per_count: int,
+    density_range: tuple[float, float] = (0.05, 0.8),
+) -> list[CountingSequence]:
+    """Generate a fixed number of sequences for each count value."""
+    examples = []
+    for count in range(min_count, max_count + 1):
+        for _ in range(sequences_per_count):
+            examples.append(generate_sequence_with_target_count(count, density_range=density_range))
+    return examples
+
+
 def generate_uniform_count_sequences(
     min_count: int,
     max_count: int,
