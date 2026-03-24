@@ -244,6 +244,10 @@ def evaluate_claude_model(
 
     async def run_all():
         client = AsyncAnthropic(api_key=api_key)
+        # Limit the number of concurrent requests to avoid being rate limited.
+        # The default is just a guess based on trial and error. Really the correct
+        # value depends on the length of the sequences and Anthropic's rate limits,
+        # which may change.
         semaphore = asyncio.Semaphore(max_concurrent)
 
         with tqdm(total=len(examples), desc="  Evaluating") as pbar:
@@ -314,37 +318,19 @@ def load_results(input_file: str) -> dict:
     return results
 
 
-def print_results_table(all_results: list[dict]):
-    """Print a summary table of results."""
+def print_results_table(result: dict):
+    """Print a summary of results for a single model."""
     print("\n" + "=" * 80)
     print("RESULTS SUMMARY")
     print("=" * 80)
-    print(f"{'Model':<20} {'Accuracy':>10} {'Correlation':>12} {'MAE':>8} {'Parse Rate':>12}")
+    print(f"{'Accuracy':>10} {'Correlation':>12} {'MAE':>8} {'Parse Rate':>12}")
     print("-" * 80)
-    
-    for result in all_results:
-        if result is None:
-            continue
-        print(
-            f"{result['model_name']:<20} "
-            f"{result['accuracy']:>10.1%} "
-            f"{result['correlation']:>12.3f} "
-            f"{result['mae']:>8.2f} "
-            f"{result['parse_rate']:>12.1%}"
-        )
-    print("=" * 80)
-
-
-def print_example_outputs(results: dict, num_examples: int = 5):
-    """Print some example model outputs."""
-    print(f"\nExample outputs for {results['model_name']}:")
-    print("-" * 60)
-
-    for r in results["results"][:num_examples]:
-        status = "✓" if r["correct"] else "✗"
-        print(f"  True: {r['true_count']:>2}, Predicted: {str(r['predicted_count']):>4}, "
-              f"{status} Response: {r['response']!r}")
-
+    print(
+        f"{result['accuracy']:>10.1%} "
+        f"{result['correlation']:>12.3f} "
+        f"{result['mae']:>8.2f} "
+        f"{result['parse_rate']:>12.1%}"
+    )
 
 def analyze_by_bins(results: dict, bin_type: str = "count"):
     """Analyze results by count bins or sequence length bins.
@@ -530,11 +516,6 @@ def main():
         help="Batch size for local model evaluation (default: 1)",
     )
     parser.add_argument(
-        "--show-examples",
-        action="store_true",
-        help="Show example outputs for each model",
-    )
-    parser.add_argument(
         "--analyze-bins",
         action="store_true",
         help="Show detailed analysis by count ranges and sequence lengths",
@@ -621,15 +602,12 @@ def main():
             save_results(result, args.save)
 
     if result:
-        if args.show_examples:
-            print_example_outputs(result)
-
         if args.analyze_bins:
             analyze_by_bins(result, bin_type="count")
             analyze_by_bins(result, bin_type="length")
 
         # Print summary
-        print_results_table([result])
+        print_results_table(result)
 
         # Generate plot if requested
         if args.plot:
