@@ -16,7 +16,6 @@ from tqdm import tqdm
 
 from counting_data import CountingSequence, generate_sequence_with_target_count, format_chat_prompt
 from models import AVAILABLE_MODELS
-from token_mapping import find_sequence_token_positions
 
 torch.set_grad_enabled(False)
 
@@ -190,10 +189,6 @@ def main():
         )
 
         for example, activations in zip(batch_examples, batch_activations):
-            prompt = format_chat_prompt(example, tokenizer)
-            token_positions = find_sequence_token_positions(
-                tokenizer, prompt, example.tokens, target_token=example.target_token
-            )
             all_activations.append(activations)
             all_metadata.append({
                 "true_count": example.true_count,
@@ -201,7 +196,6 @@ def main():
                 "target_token": example.target_token,
                 "sequence_length": example.sequence_length,
                 "tokens": example.tokens,
-                "token_positions": token_positions,
             })
 
         pbar.update(len(batch_examples))
