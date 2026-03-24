@@ -10,6 +10,7 @@ import argparse
 import gc
 
 import torch
+import numpy as np
 from nnsight import LanguageModel
 from tqdm import tqdm
 
@@ -21,7 +22,6 @@ torch.set_grad_enabled(False)
 
 # Only support gemma models for activation extraction
 SUPPORTED_MODELS = ["gemma-12b", "gemma-27b"]
-
 
 def extract_activations_for_batch(
     model: LanguageModel,
@@ -166,11 +166,6 @@ def main():
         help="Layers to extract (default: all). Comma-separated with ranges, e.g. '4,5,7-9,12'",
     )
     parser.add_argument(
-        "--mean-only",
-        action="store_true",
-        help="Only save mean activations per count at the last token position",
-    )
-    parser.add_argument(
         "--target-only",
         action="store_true",
         help="Generate sequences containing only the target token (no distractors)",
@@ -211,17 +206,8 @@ def main():
     # Extract activations
     print(f"Extracting activations (batch_size={args.batch_size})...")
 
-    # Setup accumulators based on mode
-    import numpy as np
-    if args.mean_only:
-        unique_counts = list(range(args.min_count, args.max_count + 1))
-        count_to_idx = {c: i for i, c in enumerate(unique_counts)}
-        n_layers_actual = len(target_layers) if target_layers else n_layers
-        sum_activations = None
-        count_samples = np.zeros(len(unique_counts), dtype=np.int32)
-    else:
-        all_activations = []
-        all_metadata = []
+    all_activations = []
+    all_metadata = []
 
     # Single batch loop
     pbar = tqdm(total=len(examples))
@@ -234,30 +220,19 @@ def main():
         )
 
         for example, activations in zip(batch_examples, batch_activations):
-            if args.mean_only:
-                # Accumulate for mean calculation
-                # activations shape: (n_layers, hidden_dim)
-                if sum_activations is None:
-                    hidden_dim = activations.shape[1]
-                    sum_activations = torch.zeros((n_layers_actual, len(unique_counts), hidden_dim), dtype=torch.float32)
-                count_idx = count_to_idx[example.true_count]
-                sum_activations[:, count_idx, :] += activations.float()
-                count_samples[count_idx] += 1
-            else:
-                # Store full activations with metadata
-                prompt = format_chat_prompt(example, tokenizer)
-                token_positions = find_sequence_token_positions(
-                    tokenizer, prompt, example.tokens, target_token=example.target_token
-                )
-                all_activations.append(activations)
-                all_metadata.append({
-                    "true_count": example.true_count,
-                    "sequence": example.sequence,
-                    "target_token": example.target_token,
-                    "sequence_length": example.sequence_length,
-                    "tokens": example.tokens,
-                    "token_positions": token_positions,
-                })
+            prompt = format_chat_prompt(example, tokenizer)
+            token_positions = find_sequence_token_positions(
+                tokenizer, prompt, example.tokens, target_token=example.target_token
+            )
+            all_activations.append(activations)
+            all_metadata.append({
+                "true_count": example.true_count,
+                "sequence": example.sequence,
+                "target_token": example.target_token,
+                "sequence_length": example.sequence_length,
+                "tokens": example.tokens,
+                "token_positions": token_positions,
+            })
 
         pbar.update(len(batch_examples))
         del batch_activations
@@ -265,31 +240,15 @@ def main():
         torch.cuda.empty_cache()
     pbar.close()
 
-    # Save based on mode
-    if args.mean_only:
-        mean_activations = sum_activations / torch.tensor(count_samples).view(1, -1, 1)
-        save_data = {
-            "mean_activations": mean_activations,
-            "counts": np.array(unique_counts),
-            "model_name": args.model,
-            "layers": target_layers if target_layers else list(range(n_layers)),
-            "args": vars(args),
-            "sequences_per_count": args.sequences_per_count,
-        }
-        torch.save(save_data, args.output)
-        print(f"Saved mean activations to: {args.output}")
-        print(f"  Shape: {mean_activations.shape} (n_layers, n_counts, hidden_dim)")
-    else:
-        save_data = {
-            "activations": all_activations,
-            "metadata": all_metadata,
-            "model_name": args.model,
-            "layers": target_layers if target_layers else list(range(n_layers)),
-            "args": vars(args),
-        }
-        torch.save(save_data, args.output)
-        print(f"Saved activations to: {args.output}")
-
+    save_data = {
+        "activations": all_activations,
+        "metadata": all_metadata,
+        "model_name": args.model,
+        "layers": target_layers if target_layers else list(range(n_layers)),
+        "args": vars(args),
+    }
+    torch.save(save_data, args.output)
+    print(f"Saved activations to: {args.output}")
 
 if __name__ == "__main__":
     main()
