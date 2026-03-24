@@ -6,30 +6,12 @@ Tests whether models can accurately count occurrences of a target token
 in a sequence, for studying count representations in mechanistic interpretability.
 
 Supports:
-- Local models via transformers (Qwen3-4B-Instruct, Qwen3-14B)
+- Local models via transformers (Gemma 3)
 - Claude via Anthropic API (Claude 4.5 Sonnet)
 
 Usage:
-    # Evaluate local Qwen 4B model (default)
-    python eval_counting.py --model qwen-4b
-
-    # Evaluate local Qwen 14B model (requires more VRAM)
-    python eval_counting.py --model qwen-14b
-
-    # Evaluate Claude 4.5 Sonnet
-    python eval_counting.py --model claude
-
-    # Test different count ranges
-    python eval_counting.py --model claude --num-samples 200 --min-count 0 --max-count 100
-
-    # Detailed analysis with plot
-    python eval_counting.py --model claude --analyze-bins --show-examples --plot results.png
-
-    # Save results to file
-    python eval_counting.py --model qwen-4b --save results.json
-
-    # Use fixed seed for reproducibility
-    python eval_counting.py --model qwen-4b --seed 42
+    # Evaluate local Gemma 3 12B model (default)
+    python eval_counting.py --model gemma-12b
 """
 
 import argparse
@@ -570,8 +552,8 @@ def main():
     parser.add_argument(
         "--model",
         choices=list(AVAILABLE_MODELS.keys()),
-        default="qwen-4b",
-        help="Model to evaluate: 'qwen-4b' (default), 'qwen-14b', or 'claude'",
+        default="gemma-12b",
+        help="Model to evaluate: 'gemma-12b' (default), 'gemma-12b', or 'claude'",
     )
     parser.add_argument(
         "--num-samples",
