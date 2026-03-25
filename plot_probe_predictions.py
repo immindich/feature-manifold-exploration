@@ -6,7 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from plotting import scatter_true_vs_predicted
-from train_probes import LinearProbe, MLPProbe, load_data, split_train_test
+from train_probes import LinearProbe, MLPProbe, load_data, split_train_val_test
 
 DATA_PATH = "activations-27b.pt"
 WEIGHTS_PATH = "probe-mlp-27b.pt"
@@ -14,7 +14,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load data and split (same seed as training)
 activations, metadata, layers = load_data(DATA_PATH)
-_, _, test_acts, test_counts = split_train_test(activations, metadata)
+_, _, _, _, test_acts, test_counts = split_train_val_test(activations, metadata)
 
 # Load saved probe weights
 saved = torch.load(WEIGHTS_PATH, weights_only=False)

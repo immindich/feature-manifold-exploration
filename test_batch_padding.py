@@ -52,7 +52,7 @@ def extract_activations_without_mask(
 
 def test_batch_padding_attention_mask():
     """Verify that batching with left-padding produces consistent activations."""
-    from activations_prototype import extract_activations_for_batch
+    from collect_activations import extract_activations_for_batch
 
     print("Loading model...")
     model = LanguageModel("google/gemma-3-12b-it", device_map="auto", dtype=torch.bfloat16)
