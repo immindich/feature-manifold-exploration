@@ -4,11 +4,13 @@ Investigating how language models internally represent counts, and why their int
 
 ## Setup
 
-Set up an environment and then install the required Python dependencies.
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). After installing uv, sync the environment:
 
 ```bash
-pip install torch transformers anthropic python-dotenv numpy tqdm matplotlib scikit-learn nnsight
+uv sync
 ```
+
+This creates a `.venv/` with everything pinned in `uv.lock`. Run scripts via `uv run python ...` (or activate the venv).
 
 If you are using Gemma, you need to follow the instructions in the repo to get access to the weights and authenticate with Hugging Face. Set `ANTHROPIC_API_KEY` for Claude evaluation.
 

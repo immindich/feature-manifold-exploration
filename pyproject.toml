@@ -1,0 +1,20 @@
+[project]
+name = "feature-manifold-exploration"
+version = "0.1.0"
+description = "Investigating how language models internally represent counts."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40",
+    "matplotlib>=3.8",
+    "nnsight>=0.4",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "plotly>=5.20",
+    "python-dotenv>=1.0",
+    "scikit-learn>=1.4",
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "tqdm>=4.66",
+    "transformers>=4.50",
+]
