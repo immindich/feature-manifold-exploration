@@ -14,7 +14,9 @@ This creates a `.venv/` with everything pinned in `uv.lock`. Run scripts via `uv
 
 If you are using Gemma, you need to follow the instructions in the repo to get access to the weights and authenticate with Hugging Face. Set `ANTHROPIC_API_KEY` for Claude evaluation.
 
-Running models locally requires quite a bit of VRAM. I did these experiments on a 96GB GH200 instance. Unfortunately, smaller models than Gemma don't do very well on the counting task.
+The code auto-selects CUDA, Apple MPS, or CPU at runtime, so it works on Apple Silicon as well as NVIDIA GPUs. Running the full-size models locally still needs a lot of memory — the original experiments were run on a 96GB GH200 instance. For laptops, the registered `smollm2-135m` (ungated) and `gemma-270m` / `gemma-4-E4B` (gated, ~16 GB) models work; the 12B/27B Gemma models won't fit.
+
+On MPS the transformers caching-allocator warmup tries to allocate the full model size as one buffer, which exceeds the per-buffer Metal limit for larger models. The scripts call `disable_mps_allocator_warmup()` from `device_utils.py` to skip it.
 
 ## Scripts
 

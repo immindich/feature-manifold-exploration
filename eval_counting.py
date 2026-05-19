@@ -32,6 +32,9 @@ from counting_data import (
     format_chat_prompt,
     generate_uniform_count_sequences,
 )
+from device_utils import disable_mps_allocator_warmup, empty_cache, get_device
+
+disable_mps_allocator_warmup()
 from metrics import compute_prediction_metrics
 from models import AVAILABLE_MODELS
 from plotting import scatter_true_vs_predicted
@@ -71,7 +74,7 @@ def extract_count_from_response(response: str) -> int | None:
 def evaluate_local_model(
     examples: list[CountingSequence],
     model_config: dict,
-    device: str = "cuda",
+    device: str | None = None,
     max_new_tokens: int = 10,
     dtype: str = "float16",
     batch_size: int = 1,
@@ -81,7 +84,7 @@ def evaluate_local_model(
     Args:
         examples: List of counting sequences to evaluate
         model_config: Model configuration dict with 'name' and 'path'
-        device: Device to run on (default: cuda)
+        device: Device to run on. If None, auto-selects cuda/mps/cpu.
         max_new_tokens: Max tokens to generate per example
         dtype: Model dtype (float16 or bfloat16)
         batch_size: Number of examples to process in parallel (default: 1)
@@ -90,16 +93,20 @@ def evaluate_local_model(
     model_path = model_config["path"]
     torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
 
+    if device is None:
+        device = get_device()
+
     print(f"\nLoading {model_name} from {model_path}...")
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            dtype=torch_dtype,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        load_kwargs = {"dtype": torch_dtype, "trust_remote_code": True}
+        if device == "cuda":
+            # Let accelerate shard the model across available GPUs.
+            load_kwargs["device_map"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+        if device != "cuda":
+            model = model.to(device)
     except Exception as e:
         print(f"  Failed to load model: {e}")
         return None
@@ -164,7 +171,7 @@ def evaluate_local_model(
 
     # Clean up GPU memory
     del model
-    torch.cuda.empty_cache()
+    empty_cache(device)
 
     return _compute_metrics(results, model_name)
 
@@ -573,11 +580,8 @@ def main():
         model_config = AVAILABLE_MODELS[args.model]
 
         if model_config["type"] == "local":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            if device == "cpu":
-                print("Error: CUDA is required for local model evaluation. CPU is not supported.")
-                return
-            print(f"Using dtype: {args.dtype}, batch_size: {args.batch_size}")
+            device = get_device()
+            print(f"Using device: {device}, dtype: {args.dtype}, batch_size: {args.batch_size}")
             result = evaluate_local_model(
                 examples=examples,
                 model_config=model_config,

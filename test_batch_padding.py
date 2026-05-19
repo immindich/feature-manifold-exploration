@@ -10,6 +10,10 @@ import torch
 from nnsight import LanguageModel
 
 from counting_data import CountingSequence, format_chat_prompt
+from collect_activations import get_decoder_layers
+from device_utils import disable_mps_allocator_warmup, get_device
+
+disable_mps_allocator_warmup()
 
 
 def extract_activations_without_mask(
@@ -22,7 +26,8 @@ def extract_activations_without_mask(
     Extract activations WITHOUT using the attention mask.
     This should produce corrupted activations when padding is present.
     """
-    n_layers = len(model.model.language_model.layers)
+    decoder_layers = get_decoder_layers(model)
+    n_layers = len(decoder_layers)
     target_layers = list(range(n_layers)) if layers is None else layers
 
     # Format prompts and tokenize with padding
@@ -35,7 +40,7 @@ def extract_activations_without_mask(
     # Only pass input_ids, NOT the full BatchEncoding (which includes attention_mask)
     with model.trace(tokens.input_ids) as tracer:
         for layer_idx in target_layers:
-            hidden_states = model.model.language_model.layers[layer_idx].output[0]
+            hidden_states = decoder_layers[layer_idx].output
             layer_activations.append(hidden_states.save())
 
     stacked = torch.stack(layer_activations)
@@ -55,7 +60,10 @@ def test_batch_padding_attention_mask():
     from collect_activations import extract_activations_for_batch
 
     print("Loading model...")
-    model = LanguageModel("google/gemma-3-12b-it", device_map="auto", dtype=torch.bfloat16)
+    device = get_device()
+    model_path = "google/gemma-3-12b-it"
+    device_map = "auto" if device == "cuda" else device
+    model = LanguageModel(model_path, device_map=device_map, dtype=torch.bfloat16)
     tokenizer = model.tokenizer
 
     # Create a short sequence

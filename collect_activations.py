@@ -10,16 +10,47 @@ import argparse
 import gc
 
 import torch
-from nnsight import LanguageModel
+from nnsight import LanguageModel, VisionLanguageModel
 from tqdm import tqdm
 
 from counting_data import CountingSequence, generate_sequences_per_count, format_chat_prompt
+from device_utils import disable_mps_allocator_warmup, empty_cache, get_device
 from models import AVAILABLE_MODELS
+
+disable_mps_allocator_warmup()
 
 torch.set_grad_enabled(False)
 
-# Only support gemma models for activation extraction
-SUPPORTED_MODELS = ["gemma-12b", "gemma-27b"]
+# Models supported for activation extraction (anything where get_decoder_layers works).
+SUPPORTED_MODELS = ["smollm2-135m", "gemma-270m", "gemma-4-E4B", "gemma-12b", "gemma-27b"]
+
+
+def get_decoder_layers(model):
+    """Return the list of decoder layers regardless of architecture.
+
+    Multimodal Gemma (3/4) wraps a language model inside a vision-language
+    model (model.model.language_model.layers); Llama-style models put layers
+    directly under model.model.layers.
+    """
+    underlying = model._model
+    if hasattr(underlying, "model") and hasattr(underlying.model, "language_model"):
+        return model.model.language_model.layers
+    return model.model.layers
+
+
+def load_nnsight_model(model_path: str, device: str, dtype=torch.bfloat16):
+    """Load a model via nnsight, picking VisionLanguageModel for multimodal
+    architectures and LanguageModel for plain text models."""
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_path)
+    # Multimodal wrappers have a text_config sub-config.
+    is_multimodal = hasattr(cfg, "text_config") or hasattr(cfg, "vision_config")
+    model_cls = VisionLanguageModel if is_multimodal else LanguageModel
+
+    device_map = "auto" if device == "cuda" else device
+    return model_cls(model_path, device_map=device_map, dtype=dtype)
+
 
 def extract_activations_for_batch(
     model: LanguageModel,
@@ -33,7 +64,8 @@ def extract_activations_for_batch(
     Returns:
         List of tensors, each of shape (num_layers, hidden_dim)
     """
-    n_layers = len(model.model.language_model.layers)
+    decoder_layers = get_decoder_layers(model)
+    n_layers = len(decoder_layers)
     target_layers = list(range(n_layers)) if layers is None else layers
 
     # Format prompts and tokenize with padding
@@ -45,7 +77,10 @@ def extract_activations_for_batch(
 
     with model.trace(tokens) as tracer:
         for layer_idx in target_layers:
-            hidden_states = model.model.language_model.layers[layer_idx].output[0]
+            # In transformers 5.x the layer's output is the hidden-state tensor
+            # directly; older versions wrapped it in a tuple. .output gives a
+            # (batch, seq, hidden) tensor here.
+            hidden_states = decoder_layers[layer_idx].output
             layer_activations.append(hidden_states[:, -1, :].save())
 
     # layer_activations[layer] has shape (batch, hidden_dim)
@@ -133,12 +168,13 @@ def main():
     # Load model
     model_config = AVAILABLE_MODELS[args.model]
     model_path = model_config["path"]
-    print(f"Loading model: {model_path}")
-    model = LanguageModel(model_path, device_map="auto", dtype=torch.bfloat16)
+    device = get_device()
+    print(f"Loading model: {model_path} on device: {device}")
+    model = load_nnsight_model(model_path, device=device, dtype=torch.bfloat16)
     tokenizer = model.tokenizer
 
     # Report layer selection
-    n_layers = len(model.model.language_model.layers)
+    n_layers = len(get_decoder_layers(model))
     if target_layers:
         print(f"Extracting layers: {target_layers} (of {n_layers} total)")
     else:
@@ -188,7 +224,7 @@ def main():
         # NNSight will leak memory if we don't do this explicitly
         del batch_activations
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache(device)
     pbar.close()
 
     save_data = {

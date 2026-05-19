@@ -7,6 +7,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from counting_data import CountingSequence, create_prompt, format_chat_prompt
+from device_utils import disable_mps_allocator_warmup, empty_cache, get_device
+
+disable_mps_allocator_warmup()
 from eval_counting import extract_count_from_response
 from metrics import compute_prediction_metrics
 from models import AVAILABLE_MODELS
@@ -80,11 +83,15 @@ for m in test_metadata:
 # Run Gemma-27B on the test sequences
 model_config = AVAILABLE_MODELS["gemma-27b"]
 model_path = model_config["path"]
-print(f"\nLoading {model_config['name']}...")
+device = get_device()
+print(f"\nLoading {model_config['name']} on device: {device}...")
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
-)
+load_kwargs = {"dtype": torch.bfloat16, "trust_remote_code": True}
+if device == "cuda":
+    load_kwargs["device_map"] = "auto"
+model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+if device != "cuda":
+    model = model.to(device)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
@@ -102,7 +109,7 @@ for batch_start in range(0, n_test, batch_size):
     batch_seqs = [test_sequences[i] for i in batch_indices]
     prompts = [format_chat_prompt(seq, tokenizer) for seq in batch_seqs]
 
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
     input_lengths = [inputs.attention_mask[i].sum().item() for i in range(len(batch_seqs))]
 
     with torch.no_grad():
@@ -122,14 +129,13 @@ for batch_start in range(0, n_test, batch_size):
 pbar.close()
 
 del model
-torch.cuda.empty_cache()
+empty_cache(device)
 
 # Filter out unparsed model predictions
 model_valid = ~np.isnan(model_preds)
 print(f"Model parse rate: {model_valid.sum()}/{n_test}")
 
 # --- Load probe weights and get predictions ---
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
 probe_results = {}  # {(type, layer): predictions}
 for probe_type, weights_path in [("linear", "probe-linear-27b.pt"), ("mlp", "probe-mlp-27b.pt")]:

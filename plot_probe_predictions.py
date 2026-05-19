@@ -5,12 +5,13 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+from device_utils import get_device
 from plotting import scatter_true_vs_predicted
 from train_probes import LinearProbe, MLPProbe, load_data, split_train_val_test
 
 DATA_PATH = "activations-27b.pt"
 WEIGHTS_PATH = "probe-mlp-27b.pt"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = get_device()
 
 # Load data and split (same seed as training)
 activations, metadata, layers = load_data(DATA_PATH)

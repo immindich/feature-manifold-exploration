@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from device_utils import get_device
+
 
 class LinearProbe(nn.Module):
     def __init__(self, hidden_dim: int):
@@ -192,7 +194,7 @@ def main():
     parser.add_argument("--max-epochs", type=int, default=500)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--output", type=str, default=None, help="Path to save results JSON")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default=get_device())
     args = parser.parse_args()
 
     if not args.test and not args.data:
